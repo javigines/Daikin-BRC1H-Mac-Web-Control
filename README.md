@@ -10,6 +10,19 @@ This sidesteps the usual limitation where only one phone can pair with the unit
 at a time: the server owns the single BLE link, and everyone shares it through
 the web page.
 
+## BLE reliability audit (iteration 1)
+
+Offline changes, evidence and remaining hardware gates are recorded in
+[the technical report](docs/ble-reliability-audit.md). The separate
+[Mac B handoff](docs/mac-b-validation.md) preserves the office environment and
+requires later authorization and physical attendance for any BLE test.
+
+After a connection, subscription, write or reply failure, the server now stops
+BLE operations until an operator reviews the failure and restarts it. It does
+not automatically reconnect. A request cancelled while waiting for the lock
+has not touched BLE and does not stop the active session. The connectivity
+spike also makes just one setup attempt and aborts on query failure.
+
 ## How it works
 
 The BRC1H exposes an emulated UART-over-BLE protocol (reverse-engineered by
@@ -66,7 +79,9 @@ python3 brc1h_spike.py --address <ADDRESS>
 
 When prompted, start pairing on the controller's Bluetooth menu (it shows a PIN),
 accept the macOS "Bluetooth Pairing Request" banner (top-right of the screen),
-and enter the PIN. After this one-time step, connections are silent.
+and enter the PIN. A previously bonded device should not need pairing again; this must be verified
+on the target controller. Setup errors now stop the spike rather than retrying.
+Do not keep rerunning it after a pairing or connection failure.
 
 A successful run prints the current power state, mode, setpoint and room
 temperature.
@@ -135,19 +150,24 @@ multiple viewers don't each trigger a Bluetooth read.
 **Important:** stop the server with a single `Ctrl+C` and wait for it to print:
 
 ```
-Disconnected cleanly. Safe to close this window now.
+BLE cleanup calls completed; hardware state unverified.
 ```
 
-That ensures the BLE link is torn down gracefully. An *improper* disconnect has
+That reports completion of the backend cleanup calls. It does not prove that
+the controller is responsive or that disconnection is safe for that hardware. An *improper* disconnect has
 been reported to wedge the controller until the AC unit is power-cycled at the
 isolator. So:
 
-- **Do** press `Ctrl+C` once and wait for the "Disconnected cleanly" message.
+- **Do** press `Ctrl+C` once and wait for the cleanup result; inspect any cleanup error before proceeding.
 - **Don't** press `Ctrl+C` twice, `kill -9` the process, or close the terminal /
   let the Mac sleep mid-connection. (A plain `kill <pid>` / SIGTERM is fine — it
   shuts down gracefully like `Ctrl+C`.)
 
 ## Headless / remote Mac mini setup
+
+The following are historical deployment instructions, outside iteration 1.
+Do not install an auto-restarting LaunchAgent for the controlled hardware test;
+it would bypass the manual stop/review policy by restarting the process.
 
 You can run this unattended on an always-on Mac mini, but there's one
 catch: **the first-time Bluetooth pairing must be done from a graphical login
@@ -218,9 +238,10 @@ be managed remotely.
   1. `SetSetpoint` only carried the cooling/heating values, so the controller
      acked and ignored it. It now sends the full setpoint field block (range
      flag, setpoint mode, and all min/max limits), matching pymadoka's
-     `SetPointStatus`, and reads the current pair first so it changes only the
-     active mode's setpoint (heating in Heat, cooling otherwise) and preserves
-     the other.
+     `SetPointStatus`. The implementation sends **the same whole-degree target
+     for cooling and heating**; it does not preserve the inactive setpoint.
+     This behavior is retained for compatibility. Equal/independent setpoints,
+     limits and rounding still require physical verification on the office units.
   2. This unit only accepts **whole-degree** setpoints — half-degree values
      (e.g. 21.5) were silently rejected, leaving it on the previous whole
      degree. The web `+`/`-` buttons now step by 1 °C and the server snaps any
@@ -243,8 +264,8 @@ be managed remotely.
   a phone (close the Madoka app) or out of Bluetooth range.
   ```
 
-  Needs a more robust reconnect/re-scan loop after wake (and, for an always-on
-  Mac mini, prevent sleep — e.g. `caffeinate` or Energy Saver settings).
+  Automatic reconnection is intentionally disabled in iteration 1. Stop and
+  inspect the unit after a link failure; do not use restart loops to recover.
 - [x] **Write logs to a file.** Logs now also go to a rotating file (daily, ~6
   months kept) at `<repo>/logs/daikin.log` by default — anchored to the repo so
   it works regardless of working directory; override with `--log-file`. Console
@@ -288,3 +309,10 @@ be managed remotely.
 - BLE protocol reverse-engineering: [Benjamin Lafois — Daikin-Madoka-BRC1H-BLE-Reverse](https://github.com/blafois/Daikin-Madoka-BRC1H-BLE-Reverse)
 - Reference implementation: [pymadoka](https://github.com/mduran80/pymadoka)
 - BLE library: [bleak](https://github.com/hbldh/bleak)
+
+## Upstream attribution and distribution
+
+This fork derives from [txsl/cool-vibes](https://github.com/txsl/cool-vibes).
+The audited upstream snapshot declares no explicit repository license. Credits
+above are retained; this fork does not add a license or infer permission to
+redistribute derivative code. Clarify rights with upstream before distribution.
