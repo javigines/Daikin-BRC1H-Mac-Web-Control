@@ -113,8 +113,13 @@ passed. This is source reproduction, not proof of historical wire bytes.
 Each room retains its own backend, Controller lock/future, native client and
 operation ID. Global ready-operation capacity still bounds traffic; setup has
 separate capacity. Three power-ON actions across six closed rooms are tested
-with one shared slot and accelerated slow exchanges: each executes once and
-healthy rooms do not reconnect. Queue expiry before execution still emits no
+with one shared slot and explicit queue gates: each receives a separate
+30-second admission scope followed by a complete 90-second execution scope,
+executes once, and healthy rooms do not reconnect. A timeout-context trace
+verifies the execution scope does not overlap admission. The first hosted
+Python 3.14 run exposed runner-dependent timing in a test that artificially
+compressed execution to half a second; this test now checks the actual scopes
+without that artificial wall-clock deadline. Queue expiry before execution still emits no
 SET and creates no pending operation.
 
 No native release criterion is weakened. Quarantine is ownership uncertainty,

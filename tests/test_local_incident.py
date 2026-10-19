@@ -1,5 +1,6 @@
 """Incident regressions: actual framing shapes against six closed SDK clients."""
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import time
 from uuid import uuid4
@@ -171,21 +172,44 @@ def test_three_power_clicks_with_six_serialized_rooms_get_complete_deadlines(loc
     async def case():
         for i in (6, 5, 4): local.states[f'room-{i}'][CMD_GET_POWER][0x20] = b'\x00'
         manager = await manager_for(local)
-        # Accelerate only execution; queue admission retains its independent
-        # allowance. Three serialized actions each receive a complete window.
+        # Observe real timeout boundaries instead of compressing execution to
+        # subsecond wall time (runner load must not decide correctness).
         real_timeout = asyncio.timeout
-        monkeypatch.setattr(asyncio, 'timeout', lambda seconds:
-            real_timeout(.5 if seconds == 90 else seconds))
-        local.exchange_delay = .008
+        active, entered = {}, {}
+        queued = asyncio.Event()
+        @asynccontextmanager
+        async def traced_timeout(seconds):
+            task = asyncio.current_task()
+            async with real_timeout(seconds):
+                active.setdefault(task, []).append(seconds)
+                entered.setdefault(task, []).append(seconds)
+                if sum(steps == [30] for steps in entered.values()) == 3:
+                    queued.set()
+                try:
+                    yield
+                finally:
+                    active[task].pop()
+        monkeypatch.setattr(asyncio, 'timeout', traced_timeout)
+        def check_execution_window(room, command, objects, wrote):
+            assert active[asyncio.current_task()] == [90]
+            return objects
+        local.reply_hook = check_execution_window
         local.ack = {0x20: b'\x00'}
         manager.capacity = asyncio.Semaphore(1)
         local.budget.operations = asyncio.Semaphore(1)
-        results = await asyncio.gather(*(manager.native_manual(f'room-{i}', 'power', True, str(uuid4()),
-            'Local browser action') for i in (6, 5, 4)))
+        await manager.capacity.acquire()
+        tasks = [asyncio.create_task(manager.native_manual(f'room-{i}', 'power', True, str(uuid4()),
+            'Local browser action')) for i in (6, 5, 4)]
+        await asyncio.wait_for(queued.wait(), 10)
+        assert not sets(local)
+        assert all(active[t] == [30] for t in tasks)
+        manager.capacity.release()
+        results = await asyncio.gather(*tasks)
+        assert all(entered[t] == [30, 90] and active[t] == [] for t in tasks)
         assert all(r['last_operation']['status'] == 'confirmed' for r in results)
         assert len(sets(local)) == 3 and len(local.clients) == 6
         assert all(manager.snapshot(r)['connected'] for r in manager.rooms)
-        local.exchange_delay = 0
+        local.reply_hook = None
         await manager.close(); manager.store.close()
     asyncio.run(case())
 
