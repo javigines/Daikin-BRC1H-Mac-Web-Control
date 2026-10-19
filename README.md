@@ -1,290 +1,82 @@
-# Office Aircon — Daikin BRC1H ("Madoka") web control
+# Daikin BRC1H Mac Web Control
 
-A small Python service that turns a single phone-only Daikin BRC1H wall controller
-into a **shared web app** anyone in the office can open to see and adjust the
-aircon. It runs on a Mac (e.g. an always-on Mac mini), holds one persistent
-Bluetooth Low Energy (BLE) connection to the controller, and serves a control
-page over the local network.
+**Iteration 5 consolidated candidate.** The ordinary application defaults to six simulators and `--real` remains disabled. A separate, explicitly gated macOS read-only entrypoint now implements actual Bleak 3.0.2 transport for one selected controller. No physical execution of this candidate has been authorized or performed. See [native architecture and validation](docs/iteration-5-native-integration.md) and the [blocked operator procedure](docs/native-readonly-web.md).
 
-This sidesteps the usual limitation where only one phone can pair with the unit
-at a time: the server owns the single BLE link, and everyone shares it through
-the web page.
+## Start the DEMO
 
-## How it works
-
-The BRC1H exposes an emulated UART-over-BLE protocol (reverse-engineered by
-Benjamin Lafois and implemented in [pymadoka](https://github.com/mduran80/pymadoka)).
-This project talks that protocol directly — no cloud, no Daikin account, no WiFi
-adapter required.
-
-```
-Browser (phone/laptop)  ──HTTP──►  daikin_server.py  ──BLE──►  BRC1H controller ──►  AC unit
-        (office LAN)                  (on the Mac mini)            (in the room)
-```
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `daikin_server.py` | The web server + BLE bridge. This is the thing you run. |
-| `brc1h_spike.py`   | A read-only connectivity tester. Use it once to scan for units and complete pairing, and any time you need to debug the BLE link. |
-| `madoka_protocol.py` | Shared BLE protocol: constants + pure encode/decode helpers, used by both scripts. |
-| `requirements.txt` | Python dependencies. |
-| `tests/` | pytest suite (protocol, storage, endpoints). Install `requirements-dev.txt`, run `pytest`. |
-| `debug_setpoint.sh` | Runs the server and prints the `set_setpoint` trace on exit — for diagnosing temperature writes. Must run from a graphical login (Bluetooth is denied over SSH). |
-| `probe_range.sh` | Drives a running server's HTTP API to discover which setpoints the controller accepts, prints the min/max, and restores your value. Safe to run over SSH. |
-
-## Requirements
-
-- A Mac with Bluetooth (tested on macOS via CoreBluetooth).
-- Python 3.10+.
-- A Daikin BRC1H controller with Bluetooth enabled in its on-device menu.
-
-## Setup
+Python **3.12+** (tested on 3.12.15 and 3.14.8). Use a separate development directory:
 
 ```bash
-# 1. (recommended) create a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# 2. install dependencies
-pip3 install -r requirements.txt
+python3.12 -m venv .venv-demo
+.venv-demo/bin/python -m pip install -r requirements-dev.txt
+.venv-demo/bin/python multiroom_app.py --demo --config config.example.json --db demo_history.db --port 8000
 ```
 
-### First-time pairing
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Stop with one Ctrl+C and wait for application shutdown. The server accepts only `127.0.0.1`, an unprivileged port and one worker. Without a configuration file it uses six fictional UUIDs. Never put the office inventory in the tracked example.
 
-The Mac must be **bonded** (paired) to the controller once before the server can
-talk to it. Use the spike script to find your unit and pair:
+Each card offers target temperature, power, availability and a discreet protection notice. “Más opciones” opens mode, fan, last reading and history. “Configuración” holds administration; “Laboratorio DEMO” holds simulated errors, disconnections, delays, recovery, external changes and technical events. Controls are disabled when data is stale or the room has an error; other rooms can continue working.
+
+In **Configuración**, “Libre”, “Supervisar cambios” and “Proteger configuración” select `FREE`, `MONITOR` and `ENFORCE`, respectively, with protected fields and an explicitly authorized desired state. The latest reading never automatically becomes desired state. `ENFORCE` corrects simulators only, with confirmations, stabilization, cooldown, persistent attempt budgets and STOP. Automatic power-on is disabled by default. Maintenance, temporary suspension, manual reset and events are managed per room. No native Daikin locks are activated.
+
+## Offline tests
 
 ```bash
-# list all nearby controllers with signal strength
-python3 brc1h_spike.py --scan --timeout 15
-
-# connect to the office unit (use the address from the scan) and complete pairing
-python3 brc1h_spike.py --address <ADDRESS>
+.venv-demo/bin/python -m pytest -q
+.venv-demo/bin/python daikin_server.py --selftest
+.venv-demo/bin/python brc1h_spike.py --selftest
 ```
 
-When prompted, start pairing on the controller's Bluetooth menu (it shows a PIN),
-accept the macOS "Bluetooth Pairing Request" banner (top-right of the screen),
-and enter the PIN. After this one-time step, connections are silent.
-
-A successful run prints the current power state, mode, setpoint and room
-temperature.
-
-> On macOS, BLE devices are identified by a CoreBluetooth UUID, not a MAC address,
-> so the "address" you pass will look like `XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX`.
-
-## Running the server
-
-Put the controller's address in a `.env` file once — it is gitignored, so this
-deployment's settings stay out of the repo:
+Optional real-Chromium integration against temporary HTTP/SQLite resources, without hardware:
 
 ```bash
-cp .env.example .env
-$EDITOR .env          # set DAIKIN_ADDRESS=<the address from --scan>
+.venv-demo/bin/python -m pip install -r requirements-browser.txt
+.venv-demo/bin/python -m playwright install chromium
+.venv-demo/bin/python integration/browser_demo.py
+.venv-demo/bin/python integration/browser_physical_contract.py
+.venv-demo/bin/python integration/browser_native_readonly.py
 ```
 
-```bash
-python3 daikin_server.py
-```
+Current combined results and limits: [Iteration 5 integration acceptance](docs/iteration-5-native-integration.md). Historical results: [Iteration 3 integration acceptance](docs/iteration-3-integration.md) and [Iteration 2 validation](docs/iteration-2-validation.md). The original 104 tests remain unchanged. The simplified-interface Chromium harness saves reviewed screenshots under `docs/images/`.
 
-`--address` still works and overrides `.env`; a `DAIKIN_ADDRESS` already set in
-the environment wins over the file too. Reading `.env` in-process is what makes
-the LaunchAgent below work: launchd starts the server with a minimal
-environment and never sources your shell profile, so an exported variable would
-not reach it.
+## Documentation
 
-The default port is **80**, and it needs no `sudo`: since macOS 10.14 an
-ordinary user can bind ports below 1024 on the wildcard address, which is what
-the default `--host 0.0.0.0` binds. Only a specific address (e.g.
-`--host 127.0.0.1`) still needs root, and the server says so and exits before
-touching Bluetooth. Don't run it under `sudo` — CoreBluetooth's Bluetooth grant
-is tied to your login session, and running as root can lose it.
+- [Native transport, consolidated history, tests and release/rollback](docs/iteration-5-native-integration.md).
+- [One-controller authenticated read-only web procedure — blocked pending fresh owner GO](docs/native-readonly-web.md).
+- [Physical multiroom architecture, durable ownership and hardware gates](docs/physical-multiroom-integration.md).
+- [Iteration 4B validation and independent PR #7 compatibility](docs/iteration-4b-validation.md).
 
-Then find the Mac's LAN IP and open the page from any office device:
+- [Integrated candidate and lifecycle investigations](docs/iteration-3-integration.md).
+- [Simplified interface](docs/iteration-3-ux.md) and [offline adapter](docs/iteration-3-ble-adapter.md).
+- [Mac B offline acceptance](docs/mac-b-offline-iteration-3.md).
+- [One-shot read-only canary runbook — physical execution blocked until separate authorization](docs/mac-b-readonly-canary.md).
+- [Iteration 4A offline validation and hardware-dependent limits](docs/iteration-4a-validation.md).
+- [Historical read-only canary proposal](docs/first-madoka-read-only-canary.md).
 
-```bash
-ipconfig getifaddr en0        # prints the Mac's IP
-# open http://<that-ip>/ in a browser
-```
+- [Full repository audit](docs/full-code-audit.md): confirmed defects, risks and treatment.
+- [Architecture, API, configuration and SQLite migration](docs/multiroom-architecture.md).
+- [Policies, safeguards and native locks documented by Daikin](docs/control-policies.md).
+- [Exclusively offline Mac B procedure](docs/mac-b-offline-iteration-2.md).
+- [Previous BLE audit](docs/ble-reliability-audit.md) and [previous physical handoff](docs/mac-b-validation.md): historical evidence, not authorization to run hardware from this branch.
+- [Upstream contribution readiness](docs/upstream-contribution-readiness.md): candidate patches, dependencies, compatibility and unresolved licensing.
+- [English documentation normalization](docs/english-documentation-normalization.md): translation scope and checks.
 
-Options:
+## Compatibility and security
 
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--address` | `$DAIKIN_ADDRESS`, else `.env` | BLE address / CoreBluetooth UUID of the controller (required, from any of the three) |
-| `--host` | `0.0.0.0` | Bind address (all interfaces) |
-| `--port` | `80` | Port to serve on (no root needed on the default `--host`) |
-| `--db` | `<repo>/aircon_history.db` | SQLite file for the logged history time series |
-| `--log-file` | `<repo>/logs/daikin.log` | Rotating log file (daily, ~6 months kept) |
-| `--selftest` | — | Run offline protocol-encoding checks and exit |
+Iteration 4B's explicitly injected **offline** six-controller contract fleet uses closed wire models and the hardened Controller exchange path. It supports manual command/readback testing and durable session quarantine without importing a BLE driver. Iteration 5 adds an isolated native factory, attended macOS preflight, operator authentication and explicit browser admission. Only four reviewed GET groups can reach the native radio. The ordinary launcher selects simulators exclusively. No physical recovery verifier exists. The standalone canary retains its own permanent attempt record, separate from the native web ledger and the offline ledgers.
 
-The web page shows room temperature and lets you change power, target
-temperature, mode (Cool/Heat/Auto/Fan/Dry) and fan speed, auto-refreshing every
-10 seconds. The target-temperature buttons step in whole degrees (this unit
-rejects half-degree setpoints) and disable at the min/max the controller
-reports for the current mode.
+The standalone `madoka_readonly_canary.py` defaults to OFFLINE; `--selftest` never imports Bleak. Its explicit physical mode is isolated from the web application, requires an exact reviewed clean SHA and private UUID confirmation, and permanently consumes one attempt before discovery. There is no reset/retry path. See the runbook before any separately authorized physical test.
 
-A background poller logs status to SQLite, and a **`/history`** page (linked from
-the control page) charts room temperature and the target setpoint over the last
-6h / 24h / 3d. Status shown to web clients comes from the poller's cache, so
-multiple viewers don't each trigger a Bluetooth read.
+The legacy physical entrypoints `daikin_server.py` and `brc1h_spike.py` allow only `--selftest`; debugging/range helpers are blocked. `multiroom_app.py --real` fails before opening the DB or importing a BLE backend. The LaunchAgent template neither starts nor restarts automatically and has not been installed. No schedules or bulk commands are active.
 
-## Stopping safely
+The old `/api/*` API returns 410: migrate to `/api/controllers/{id}/...`, never array positions. New history is separated by identifier, uses a different DB and must not be opened with old code. An explicit import into a new copy of the original history is available; see architecture.
 
-**Important:** stop the server with a single `Ctrl+C` and wait for it to print:
-
-```
-Disconnected cleanly. Safe to close this window now.
-```
-
-That ensures the BLE link is torn down gracefully. An *improper* disconnect has
-been reported to wedge the controller until the AC unit is power-cycled at the
-isolator. So:
-
-- **Do** press `Ctrl+C` once and wait for the "Disconnected cleanly" message.
-- **Don't** press `Ctrl+C` twice, `kill -9` the process, or close the terminal /
-  let the Mac sleep mid-connection. (A plain `kill <pid>` / SIGTERM is fine — it
-  shuts down gracefully like `Ctrl+C`.)
-
-## Headless / remote Mac mini setup
-
-You can run this unattended on an always-on Mac mini, but there's one
-catch: **the first-time Bluetooth pairing must be done from a graphical login
-session**, because the pairing PIN prompt is a macOS window-server dialog. It
-cannot be completed over plain SSH. After that one-time bond, everything else can
-be managed remotely.
-
-1. **Pair once via a graphical session.** Enable Screen Sharing
-   (System Settings → General → Sharing → Screen Sharing), connect to the mini,
-   and run the pairing step from the [first-time pairing](#first-time-pairing)
-   instructions above. Accept the banner and enter the PIN. The bond persists
-   across reboots, so this is a one-time step.
-
-2. **Enable automatic login** (System Settings → Users & Groups → Automatically
-   log in as …) so the user session — which CoreBluetooth needs — is always active.
-   macOS won't offer this while FileVault is on; without it, someone has to log
-   in after every reboot before the server can start.
-
-3. **Prevent sleep.** A sleeping Mac currently fails to reconnect to the
-   controller (see Known issues). Disable sleep:
-
-   ```bash
-   sudo pmset -a sleep 0 displaysleep 10 disablesleep 1
-   ```
-
-   (or wrap the server in `caffeinate -s`).
-
-4. **Run it as a LaunchAgent** so it starts at login and restarts on failure. A
-   template is provided at [`deploy/com.example.daikin-aircon.plist`](deploy/com.example.daikin-aircon.plist).
-   Edit the paths inside it (the address comes from `.env`, so the template
-   carries no site-specific values), then:
-
-   ```bash
-   cp deploy/com.example.daikin-aircon.plist ~/Library/LaunchAgents/
-   launchctl load -w ~/Library/LaunchAgents/com.example.daikin-aircon.plist
-   # logs go to ~/Library/Logs/daikin-aircon.log
-   ```
-
-   **Load it while you can see the Mac's screen.** launchd runs the Python
-   interpreter directly, so macOS asks again whether *python3* may use Bluetooth
-   — Terminal's grant from the pairing step doesn't carry over. Until someone
-   clicks Allow, the server sits at `Connecting to …` with no error and
-   `/api/status` reports `connected: false`. The grant belongs to the
-   interpreter's resolved path, so rebuilding the venv on a different Python
-   asks again.
-
-   Unloading it sends `SIGTERM`, which the server handles as a clean BLE
-   disconnect:
-
-   ```bash
-   launchctl unload -w ~/Library/LaunchAgents/com.example.daikin-aircon.plist
-   ```
-
-   Use a **LaunchAgent** (per-user), not a system LaunchDaemon — CoreBluetooth
-   does not work reliably outside a logged-in user session.
-
-## Notes & limitations
-
-- While the server holds the connection, phones running the Daikin Madoka app
-  cannot connect to that unit — this is the intended "one shared controller" model.
-- There is no authentication: anyone on the office network can open the page. It
-  is meant for a trusted LAN.
-- BLE is short-range; keep the Mac within Bluetooth range of the controller.
-
-## Known issues / TODO
-
-- [x] **Temperature changes don't apply.** Two causes, both fixed:
-  1. `SetSetpoint` only carried the cooling/heating values, so the controller
-     acked and ignored it. It now sends the full setpoint field block (range
-     flag, setpoint mode, and all min/max limits), matching pymadoka's
-     `SetPointStatus`, and reads the current pair first so it changes only the
-     active mode's setpoint (heating in Heat, cooling otherwise) and preserves
-     the other.
-  2. This unit only accepts **whole-degree** setpoints — half-degree values
-     (e.g. 21.5) were silently rejected, leaving it on the previous whole
-     degree. The web `+`/`-` buttons now step by 1 °C and the server snaps any
-     target to the nearest whole degree. Confirmed against the hardware via the
-     re-read in `debug_setpoint.sh`.
-- [ ] **Add swing / louver controls** *(needs a fresh BLE capture).* The swing
-  command is **not documented in any public source** — not pymadoka, the blafois
-  reverse-engineering notes, the Home Assistant integration, or the OpenHAB
-  binding. The blafois notes state the function list is incomplete and that the
-  Madoka app's privileged "operator" mode has un-reversed functions; airflow
-  direction is likely one of them. Implementing this requires capturing the
-  Madoka phone app's BLE traffic while toggling the louver, then decoding the
-  command id/payload — it can't be derived from existing code.
-- [ ] **Reconnect after the Mac sleeps.** After the Mac wakes from sleep the
-  server fails to re-find the controller and gets stuck, e.g.:
-
-  ```
-  Connecting to <ADDRESS> ...
-  status read failed: Controller <ADDRESS> not found. It may be connected to
-  a phone (close the Madoka app) or out of Bluetooth range.
-  ```
-
-  Needs a more robust reconnect/re-scan loop after wake (and, for an always-on
-  Mac mini, prevent sleep — e.g. `caffeinate` or Energy Saver settings).
-- [x] **Write logs to a file.** Logs now also go to a rotating file (daily, ~6
-  months kept) at `<repo>/logs/daikin.log` by default — anchored to the repo so
-  it works regardless of working directory; override with `--log-file`. Console
-  logging is unchanged.
-- [x] **Survey what data the controller exposes, and log it over time.** A
-  background poller (every 10s) is now the single BLE reader: it caches status
-  (served to web clients without a per-request BLE read) and logs samples to
-  SQLite (every 60s or on change). A `/history` page charts room temperature and
-  the target setpoint over 6h/24h/3d. The survey found the controller exposes
-  power, mode, setpoint(+limits), fan, indoor temp, filter status, eye-brightness
-  (writable), and model/firmware; **outdoor temp reads as n/a on this unit**, and
-  **humidity, CO2/air-quality, and energy/power are not available** in the
-  protocol. Runtime hours need an extra request (see below).
-- [x] **Runtime/operation hours — investigated, not available on this unit.**
-  `GetOperationHours 0x0112` needs an *arg'd* request listing the counter fields
-  (unit `0x02`=0, fields `0x40`–`0x48`) per the OpenHAB binding. Built and tested
-  the request/decoder, but this controller answers with every counter at **size
-  0** ("unsupported"), so there's nothing to log — same bucket as outdoor temp /
-  CO2 / energy. The request + little-endian parser would work on a unit that does
-  report them. The counters *might* be gated behind the controller's privileged/
-  "operator" mode (`0x4112`), which we chose not to poke (it's a state-changing,
-  only-partially-reversed write).
-- [ ] Single unit only. Multi-room support (one card per controller) — *de-prioritised for now.*
-- [x] Factored the shared BLE protocol (constants + pure encode/decode helpers)
-  out of the two scripts into `madoka_protocol.py`, with a pytest suite covering
-  protocol, storage, and endpoints.
-- [ ] **Grow this into an office dashboard.** Generalise the single-purpose
-  aircon app into a broader office dashboard that collects and visualises more
-  than just the AC. Each source below is a separate integration (not from the
-  BRC1H) feeding the same time-series/history model and UI:
-  - **Network data usage** — bandwidth/throughput from the office router or
-    gateway (SNMP or the router's API), charted over time.
-  - **LLM token usage** — API token consumption (e.g. Anthropic usage) per
-    day/project for cost visibility.
-
-  Implies refactoring the current temp/setpoint history into one "panel" among
-  several, with storage and a UI that aren't aircon-specific.
+The DEMO ephemeral local token protects mutations against CSRF; **it does not authenticate users**. The dedicated native web mode additionally requires a random ephemeral operator password for every page, asset and API request. It binds only to loopback; LAN exposure, physical writes, ENFORCE and native ownership recovery remain blocked. MONITOR notifications are events and dashboard notices; no external messages are sent.
 
 ## Credits
 
-- BLE protocol reverse-engineering: [Benjamin Lafois — Daikin-Madoka-BRC1H-BLE-Reverse](https://github.com/blafois/Daikin-Madoka-BRC1H-BLE-Reverse)
-- Reference implementation: [pymadoka](https://github.com/mduran80/pymadoka)
-- BLE library: [bleak](https://github.com/hbldh/bleak)
+- Upstream: [txsl/cool-vibes](https://github.com/txsl/cool-vibes).
+- BLE protocol reverse-engineering: [Benjamin Lafois — Daikin-Madoka-BRC1H-BLE-Reverse](https://github.com/blafois/Daikin-Madoka-BRC1H-BLE-Reverse).
+- Reference implementation: [pymadoka](https://github.com/mduran80/pymadoka).
+- Native BLE library (reviewed version 3.0.2): [bleak](https://github.com/hbldh/bleak).
+
+The audited upstream declares no explicit license. Attribution is preserved; this fork adds no license and infers no redistribution rights. Clarify rights with the author before redistributing derivatives or making a formal contribution. Historical claims about units in other environments do not certify these six office controllers.

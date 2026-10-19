@@ -41,6 +41,9 @@ import socket
 import sqlite3
 import time
 from logging.handlers import TimedRotatingFileHandler
+from contextlib import asynccontextmanager
+
+from ble_lifecycle import cleanup_client
 
 from madoka_protocol import (
     SERVICE_UUID, NOTIFY_CHAR, WRITE_CHAR, MAX_CHUNK_SIZE, CHUNK_DATA_LEN,
@@ -132,55 +135,123 @@ class Controller:
         self.reasm = Reassembler()
         self.pending = {}
         self.connected = False
+        self.failure = None  # latched: operator review/restart required after BLE errors
+        self.closed = False
         self.latest = {"connected": False}   # cached status served to web clients
         self.latest_ts = 0.0
         self.device_info = {}
         self.filter_dirty = None   # cached clean-filter flag (read on a slow cadence)
 
     def _on_notify(self, _sender, data: bytearray):
+        if self.failure or self.closed:
+            return
         payload = self.reasm.feed(bytearray(data))
-        if payload is None or len(payload) <= 4:
+        if payload is None or len(payload) < 4:
             return
         fut = self.pending.get(cmd_id_of(payload))
         if fut and not fut.done():
             fut.set_result(payload)
 
-    async def ensure_connected(self):
-        from bleak import BleakClient, BleakScanner
-        if self.client is not None and self.client.is_connected:
-            return
+    def _fail(self, reason):
+        self.failure = reason
         self.connected = False
-        log.info("Connecting to %s ...", self.address)
-        dev = await BleakScanner.find_device_by_address(self.address, timeout=10.0)
-        if dev is None:
-            raise RuntimeError(
-                f"Controller {self.address} not found. It may be connected to a phone "
-                f"(close the Madoka app) or out of Bluetooth range."
-            )
-        self.client = BleakClient(dev, disconnected_callback=self._on_disconnect)
-        await self.client.connect()
-        await self.client.start_notify(NOTIFY_CHAR, self._on_notify)
-        self.connected = True
-        log.info("Connected and subscribed.")
+        self.latest = {"connected": False, "error": reason}
+        self.reasm.reset()
+        for fut in self.pending.values():
+            if not fut.done():
+                fut.set_exception(ConnectionError(reason))
 
-    def _on_disconnect(self, _client):
-        self.connected = False
-        log.warning("BLE link dropped; will reconnect on next request.")
+    async def ensure_connected(self):
+        async with self.lock:
+            await self._ensure_connected()
+
+    async def _ensure_connected(self):
+        if self.closed or self.failure:
+            raise ConnectionError(self.failure or "Controller closed")
+        if self.connected and self.client is not None and self.client.is_connected:
+            return
+        if self.client is not None:
+            # CoreBluetooth state can change before its disconnect callback runs.
+            self._fail("BLE link unavailable; operator review/restart required")
+            await self._cleanup_after_error()
+            raise ConnectionError(self.failure)
+        from bleak import BleakClient, BleakScanner
+        log.info("Connecting to %s ...", self.address)
+        try:
+            dev = await asyncio.wait_for(
+                BleakScanner.find_device_by_address(self.address, timeout=10.0), 12.0)
+            if self.closed or self.failure:
+                raise ConnectionError(self.failure or "Controller closed")
+            if dev is None:
+                raise ConnectionError(f"Controller {self.address} not found")
+            client = BleakClient(dev, disconnected_callback=self._on_disconnect)
+            self.client = client
+            # Bind notifications to this client so stale callbacks cannot cross sessions.
+            def notify(sender, data):
+                if self.client is client:
+                    self._on_notify(sender, data)
+            await asyncio.wait_for(client.connect(), 20.0)
+            if self.closed or self.failure or not client.is_connected:
+                raise ConnectionError(self.failure or "BLE link unavailable after connect")
+            await asyncio.wait_for(client.start_notify(NOTIFY_CHAR, notify), 20.0)
+            if self.failure or not client.is_connected:
+                raise ConnectionError(self.failure or "BLE link lost during subscription")
+            self.connected = True
+            log.info("Connected and subscribed.")
+        except (Exception, asyncio.CancelledError):
+            self._fail("BLE setup failed; operator review/restart required")
+            await self._cleanup_after_error()
+            raise
+
+    def _on_disconnect(self, client):
+        if client is not self.client or self.closed:
+            return
+        self._fail("BLE link dropped; operator review/restart required")
+        log.warning("%s", self.failure)
+
+    async def _cleanup_after_error(self):
+        if self.client is not None:
+            try:
+                await cleanup_client(self.client)
+                self.client = None
+            except Exception:
+                log.exception("BLE cleanup failed; physical state unverified")
 
     async def request(self, cmd_id: int, args=None, timeout=6.0) -> dict:
-        """Send a command/query and return the parsed response objects."""
+        """Serialize writes and replies. An ambiguous exchange ends this session.
+
+        The wire format has no transaction id. Retrying the same command after a
+        timeout could accept its old reply as the new reply; never auto-retry.
+        `timeout` bounds the complete write/reply exchange, after connection.
+        """
+        chunks = build_command(cmd_id, args)  # local errors must not poison the link
         async with self.lock:
-            await self.ensure_connected()
-            loop = asyncio.get_event_loop()
-            fut = loop.create_future()
+            await self._ensure_connected()
+            fut = asyncio.get_running_loop().create_future()
             self.pending[cmd_id] = fut
+            self.reasm.reset()
             try:
-                for chunk in build_command(cmd_id, args):
-                    await self.client.write_gatt_char(WRITE_CHAR, bytes(chunk), response=False)
-                payload = await asyncio.wait_for(fut, timeout=timeout)
+                async def exchange():
+                    for chunk in chunks:
+                        if self.closed or self.failure or not self.client.is_connected:
+                            raise ConnectionError(self.failure or "BLE link unavailable during write")
+                        await self.client.write_gatt_char(WRITE_CHAR, bytes(chunk), response=False)
+                    return await fut
+                payload = await asyncio.wait_for(exchange(), timeout=timeout)
+                if self.failure:
+                    raise ConnectionError(self.failure)
                 return parse_objects(payload)
+            except (Exception, asyncio.CancelledError):
+                self._fail("BLE exchange interrupted; operator review/restart required")
+                await self._cleanup_after_error()
+                raise
             finally:
                 self.pending.pop(cmd_id, None)
+                if not fut.done():
+                    fut.cancel()
+                elif not fut.cancelled():
+                    fut.exception()  # consume failure if the write failed first
+                self.reasm.reset()
 
     # ---- reads -------------------------------------------------------------
     async def get_status(self) -> dict:
@@ -289,12 +360,13 @@ class Controller:
         await self.request(CMD_SET_FAN, [(0x20, bytes([speed])), (0x21, bytes([speed]))])
 
     async def disconnect(self):
-        if self.client is not None and self.client.is_connected:
-            try:
-                await self.client.stop_notify(NOTIFY_CHAR)
-            except Exception:
-                pass
-            await self.client.disconnect()
+        # Mark closed and wake pending requests before waiting for their lock.
+        self.closed = True
+        self._fail("Controller closed")
+        async with self.lock:
+            if self.client is not None:
+                await cleanup_client(self.client)
+                self.client = None
 
 
 # ----------------------------------------------------------------------------
@@ -404,7 +476,28 @@ def build_app(controller: "Controller", store: "HistoryStore"):
     from fastapi.responses import HTMLResponse, JSONResponse
     from pydantic import BaseModel
 
-    app = FastAPI(title="Office Aircon")
+    @asynccontextmanager
+    async def lifespan(app):
+        task = asyncio.create_task(run_poller(controller, store))
+        log.info("Background poller started (poll every %ds, log every %ds).",
+                 POLL_INTERVAL, LOG_INTERVAL)
+        try:
+            yield
+        finally:
+            task.cancel()
+            try:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            finally:
+                try:
+                    await controller.disconnect()
+                    log.info("BLE cleanup calls completed; hardware state unverified.")
+                finally:
+                    store.close()
+
+    app = FastAPI(title="Office Aircon", lifespan=lifespan)
 
     class PowerBody(BaseModel):
         on: bool
@@ -475,31 +568,6 @@ def build_app(controller: "Controller", store: "HistoryStore"):
             raise HTTPException(400, "invalid fan speed")
         await controller.set_fan(body.speed)
         return JSONResponse(await controller.refresh())
-
-    poller_task = {}
-
-    @app.on_event("startup")
-    async def _startup():
-        poller_task["t"] = asyncio.create_task(run_poller(controller, store))
-        log.info("Background poller started (poll every %ds, log every %ds).",
-                 POLL_INTERVAL, LOG_INTERVAL)
-
-    @app.on_event("shutdown")
-    async def _shutdown():
-        log.info("Shutting down - disconnecting from controller cleanly ...")
-        task = poller_task.get("t")
-        if task:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        try:
-            await controller.disconnect()
-            log.info("Disconnected cleanly. Safe to close this window now.")
-        except Exception as e:
-            log.warning("Disconnect hit an error: %s", e)
-        store.close()
 
     return app
 
@@ -591,7 +659,7 @@ function render(s){
   state = s;
   const controls = el("controls");
   if(!s || !s.connected){
-    el("status").innerHTML = '<span class="offline">Controller offline - reconnecting...</span>';
+    el("status").innerHTML = '<span class="offline">Controller offline - check server logs</span>';
     el("filterStatus").textContent = "";
     controls.classList.add("dim");
     return;
@@ -638,7 +706,7 @@ async function call(path, body){
     const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
     if(!r.ok){ throw new Error(await r.text()); }
     render(await r.json());
-  }catch(e){ el("status").innerHTML = '<span class="offline">'+e.message+'</span>'; }
+  }catch(e){ el("status").textContent = e.message; }
   finally{ busy = false; }
 }
 
@@ -943,7 +1011,7 @@ def main():
     p.add_argument("--address", default=os.environ.get("DAIKIN_ADDRESS"),
                    help="BLE address / CoreBluetooth UUID of the controller "
                         "(default: $DAIKIN_ADDRESS, which <repo>/.env can supply)")
-    p.add_argument("--host", default="0.0.0.0", help="bind host (default 0.0.0.0 = all interfaces)")
+    p.add_argument("--host", default="127.0.0.1", help="loopback only in iteration 2")
     p.add_argument("--port", type=int, default=80, help="port (default 80)")
     p.add_argument("--db", default=DEFAULT_DB,
                    help="SQLite history file (default: <repo>/aircon_history.db)")
@@ -954,6 +1022,9 @@ def main():
 
     if args.selftest:
         raise SystemExit(selftest())
+
+    p.error("Hardware BLE disabled in iteration 2. Use: python multiroom_app.py --demo. "
+            "Physical validation requires a separate reviewed authorization/change.")
 
     if not args.address:
         p.error("no controller address: pass --address, or set DAIKIN_ADDRESS in the "

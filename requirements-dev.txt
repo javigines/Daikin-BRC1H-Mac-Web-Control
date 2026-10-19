@@ -1,4 +1,5 @@
-# Development/test dependencies (not needed to run the server).
+-r requirements.txt
+# Runtime plus development/test dependencies for a complete fresh environment.
 # Install with: pip3 install -r requirements-dev.txt
 
 pytest>=8.0

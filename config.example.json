@@ -1,0 +1,110 @@
+{
+  "max_active_devices": 6,
+  "max_concurrent_operations": 2,
+  "stagger_seconds": 0.25,
+  "stale_seconds": 35.0,
+  "devices": [
+    {
+      "id": "room-1",
+      "name": "Recepción",
+      "address": "00000000-0000-4000-8000-000000000001",
+      "enabled": true,
+      "queries": {
+        "interval_seconds": 10.0,
+        "timeout_seconds": 5.0,
+        "fields": [
+          "power",
+          "mode",
+          "setpoint",
+          "sensor",
+          "fan"
+        ]
+      }
+    },
+    {
+      "id": "room-2",
+      "name": "Sala de reuniones",
+      "address": "00000000-0000-4000-8000-000000000002",
+      "enabled": true,
+      "queries": {
+        "interval_seconds": 10.0,
+        "timeout_seconds": 5.0,
+        "fields": [
+          "power",
+          "mode",
+          "setpoint",
+          "sensor",
+          "fan"
+        ]
+      }
+    },
+    {
+      "id": "room-3",
+      "name": "Zona de trabajo",
+      "address": "00000000-0000-4000-8000-000000000003",
+      "enabled": true,
+      "queries": {
+        "interval_seconds": 10.0,
+        "timeout_seconds": 5.0,
+        "fields": [
+          "power",
+          "mode",
+          "setpoint",
+          "sensor",
+          "fan"
+        ]
+      }
+    },
+    {
+      "id": "room-4",
+      "name": "Dirección",
+      "address": "00000000-0000-4000-8000-000000000004",
+      "enabled": true,
+      "queries": {
+        "interval_seconds": 10.0,
+        "timeout_seconds": 5.0,
+        "fields": [
+          "power",
+          "mode",
+          "setpoint",
+          "sensor",
+          "fan"
+        ]
+      }
+    },
+    {
+      "id": "room-5",
+      "name": "Sala creativa",
+      "address": "00000000-0000-4000-8000-000000000005",
+      "enabled": true,
+      "queries": {
+        "interval_seconds": 10.0,
+        "timeout_seconds": 5.0,
+        "fields": [
+          "power",
+          "mode",
+          "setpoint",
+          "sensor",
+          "fan"
+        ]
+      }
+    },
+    {
+      "id": "room-6",
+      "name": "Oficina norte",
+      "address": "00000000-0000-4000-8000-000000000006",
+      "enabled": true,
+      "queries": {
+        "interval_seconds": 10.0,
+        "timeout_seconds": 5.0,
+        "fields": [
+          "power",
+          "mode",
+          "setpoint",
+          "sensor",
+          "fan"
+        ]
+      }
+    }
+  ]
+}

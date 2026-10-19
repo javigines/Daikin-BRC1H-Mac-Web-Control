@@ -1,0 +1,33 @@
+name: Madoka Offline Tests
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.14']
+    env:
+      MADOKA_OFFLINE_ONLY: '1'
+      PYTHONPATH: ${{ github.workspace }}/ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Verify driver guard
+        run: |
+          python - <<'PY'
+          try:
+              import bleak
+          except RuntimeError as exc:
+              assert 'forbidden in offline CI' in str(exc)
+          else:
+              raise SystemExit('Bluetooth import guard missing')
+          PY
+      - run: python -m pytest -q

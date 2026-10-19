@@ -104,21 +104,34 @@ def split_in_chunks(data: bytearray) -> list:
 
 class Reassembler:
     def __init__(self):
+        self.reset()
+
+    def reset(self):
         self.chunks = []
 
     def feed(self, chunk: bytearray):
-        if len(chunk) < 2:
+        if not 2 <= len(chunk) <= MAX_CHUNK_SIZE:
+            self.reset()
             return None
         if chunk[0] == 0:
-            self.chunks = []
+            self.reset()
+        if chunk[0] != len(self.chunks):
+            self.reset()
+            return None
+        total_len = self.chunks[0][1] if self.chunks else chunk[1]
+        # The length byte includes itself and the three-byte command header.
+        # All non-final chunks carry 19 data bytes; padding is not on wire.
+        remaining = total_len - len(self.chunks) * CHUNK_DATA_LEN
+        if total_len < 4 or len(chunk) - 1 != min(CHUNK_DATA_LEN, remaining):
+            self.reset()
+            return None
         self.chunks.append(chunk)
-        total_len = self.chunks[0][1]
-        expected = -(-total_len // MAX_CHUNK_SIZE)
+        expected = -(-total_len // CHUNK_DATA_LEN)
         if len(self.chunks) == expected:
             out = bytearray()
             for c in self.chunks:
                 out.extend(c[1:])
-            self.chunks = []
+            self.reset()
             return out
         return None
 
@@ -128,14 +141,18 @@ def cmd_id_of(payload: bytearray) -> int:
 
 
 def parse_objects(payload: bytearray) -> dict:
+    if len(payload) < 4 or payload[0] != len(payload):
+        raise ValueError("Invalid Madoka payload length")
     objects = {}
     i = 4
-    while i + 1 < len(payload):
+    while i < len(payload):
+        if i + 1 >= len(payload):
+            raise ValueError("Truncated Madoka object header")
         oid = payload[i]
         size = payload[i + 1]
         value = bytes(payload[i + 2:i + 2 + size])
         if len(value) < size:
-            break
+            raise ValueError("Truncated Madoka object value")
         objects[oid] = value
         i += 2 + size
     return objects

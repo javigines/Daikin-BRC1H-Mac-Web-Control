@@ -22,3 +22,11 @@ env/
 .idea/
 .vscode/
 *.swp
+
+# Private inventory/configuration and runtime state
+config.local.json
+inventory.local.json
+madoka_inventory.json
+*.db-*
+*.db.lock
+artifacts/

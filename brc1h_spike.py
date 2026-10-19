@@ -38,13 +38,16 @@ macOS NOTES
     * The first connection may trigger a macOS pairing prompt; accept it. A PIN may
       appear on the controller's screen.
     * Clean disconnect matters: an improper termination has been reported to wedge
-      the controller (needing a full AC power-cycle). This script always tries to
-      stop notifications and disconnect cleanly in a finally block.
+      the controller (needing a full AC power-cycle). This script attempts bounded
+      stop-notify/disconnect cleanup; completion is not proof of hardware safety.
 """
 
 import argparse
 import asyncio
 import sys
+import logging
+
+from ble_lifecycle import cleanup_client
 
 from madoka_protocol import (
     SERVICE_UUID, NOTIFY_CHAR, WRITE_CHAR, MODE_NAMES,
@@ -200,73 +203,19 @@ async def find_device(name_filter=None, address=None, timeout=8.0):
 
 
 async def connect_and_subscribe(client, on_notify, pair_window=120.0):
-    """Connect, bond if needed, and subscribe - tolerating the macOS pairing flow.
+    """One bounded setup attempt. Pairing/link errors require operator review.
 
-    The BRC1H requires an encrypted link before it permits notifications. On macOS
-    the first encrypted operation triggers an OS pairing request that appears as a
-    NOTIFICATION BANNER (top-right), not a modal dialog, while the controller shows
-    a PIN. Two quirks we handle:
-      * bleak raises "Encryption is insufficient" instantly instead of waiting for
-        you to accept -> we retry for up to `pair_window` seconds.
-      * completing the bond TEARS DOWN the current link, so the next call fails with
-        "Not connected" -> we reconnect and try again. The bond itself persists, so
-        once paired this converges quickly (and future runs skip the prompt).
+    `pair_window` bounds the whole attempt, including the OS pairing prompt.
+    No implicit reconnects or notification retries on a BRC1H.
     """
-    deadline = asyncio.get_event_loop().time() + pair_window
-    announced = False
-    while True:
+    async def setup():
         if not client.is_connected:
-            try:
-                await client.connect()
-            except Exception as e:
-                if asyncio.get_event_loop().time() >= deadline:
-                    raise
-                print(f"    ...connect retry ({e}); waiting 2s")
-                await asyncio.sleep(2.0)
-                continue
-
-        try:
-            await client.start_notify(NOTIFY_CHAR, on_notify)
-            print("Notifications enabled (link is bonded).")
-            return
-        except Exception as e:
-            msg = str(e)
-            timed_out = asyncio.get_event_loop().time() >= deadline
-
-            # Clear any half-registered subscription left by a failed attempt, so the
-            # next try doesn't trip over "notifications already started".
-            try:
-                await client.stop_notify(NOTIFY_CHAR)
-            except Exception:
-                pass
-
-            if "already started" in msg:
-                # Stale bleak state from a prior failure - cleared above, retry now.
-                await asyncio.sleep(0.5)
-            elif "Not connected" in msg:
-                # The bond completing dropped the link - reconnect and retry.
-                print("    ...link dropped during pairing; reconnecting")
-                await asyncio.sleep(2.0)
-            elif "ncryption" in msg or "nsufficient" in msg:
-                if not announced:
-                    print("\n>>> PAIRING REQUIRED <<<")
-                    print("    1. On the controller's Bluetooth menu, start pairing so it")
-                    print("       shows a PIN.")
-                    print("    2. Look TOP-RIGHT on the Mac for a 'Bluetooth Pairing Request'")
-                    print("       banner (also check Notification Center / the clock).")
-                    print("    3. Enter the PIN, click Pair. This script keeps retrying.\n")
-                    announced = True
-                print("    ...waiting for pairing to complete, retrying in 3s")
-                await asyncio.sleep(3.0)
-            else:
-                raise  # an unexpected failure - surface it
-
-            if timed_out:
-                raise TimeoutError(
-                    "Could not establish a bonded connection in time. If NO macOS "
-                    "pairing banner ever appeared, this Mac won't bond with the "
-                    "controller cleanly - use the Raspberry Pi bridge route instead."
-                )
+            await client.connect()
+        await client.start_notify(NOTIFY_CHAR, on_notify)
+        if not client.is_connected:
+            raise ConnectionError("BLE link lost during subscription")
+    await asyncio.wait_for(setup(), timeout=pair_window)
+    print("Notifications enabled.")
 
 
 async def run_queries(dev):
@@ -278,7 +227,7 @@ async def run_queries(dev):
 
     def on_notify(_sender, data: bytearray):
         payload = reasm.feed(bytearray(data))
-        if payload is None or len(payload) <= 4:
+        if payload is None or len(payload) < 4:
             return
         cid = cmd_id_of(payload)
         fut = pending.get(cid)
@@ -286,33 +235,48 @@ async def run_queries(dev):
             fut.set_result(payload)
 
     print(f"Connecting to {dev.address} ...")
-    client = BleakClient(dev)
+    disconnected = False
+
+    def on_disconnect(_client):
+        nonlocal disconnected
+        disconnected = True
+        reasm.reset()
+        for fut in pending.values():
+            if not fut.done():
+                fut.set_exception(ConnectionError("BLE link dropped; STOP, no retry"))
+
+    client = BleakClient(dev, disconnected_callback=on_disconnect)
     try:
         await connect_and_subscribe(client, on_notify)
         for label, cmd_id in QUERIES.items():
+            if disconnected:
+                raise ConnectionError("BLE link dropped; STOP, no retry")
             fut = loop.create_future()
             pending[cmd_id] = fut
-            for chunk in build_query(cmd_id):
-                await client.write_gatt_char(WRITE_CHAR, bytes(chunk), response=False)
             try:
-                payload = await asyncio.wait_for(fut, timeout=5.0)
+                async def exchange():
+                    for chunk in build_query(cmd_id):
+                        await client.write_gatt_char(WRITE_CHAR, bytes(chunk), response=False)
+                    return await fut
+                payload = await asyncio.wait_for(exchange(), timeout=5.0)
                 print(f"  {label:<16}: {interpret(cmd_id, parse_objects(payload))}")
-            except asyncio.TimeoutError:
-                print(f"  {label:<16}: (no response within 5s)")
             finally:
                 pending.pop(cmd_id, None)
-    finally:
+                if not fut.done():
+                    fut.cancel()
+                elif not fut.cancelled():
+                    fut.exception()
+                reasm.reset()
+    except (Exception, asyncio.CancelledError):
+        try:
+            await cleanup_client(client)
+        except Exception:
+            logging.exception("BLE cleanup failed; physical state unverified")
+        raise
+    else:
         print("Cleaning up (stop notify + disconnect) ...")
-        try:
-            if client.is_connected:
-                await client.stop_notify(NOTIFY_CHAR)
-        except Exception:
-            pass
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
-    print("Done. Connection closed cleanly.")
+        await cleanup_client(client)
+        print("Done. BLE cleanup calls completed; hardware state unverified.")
 
 
 async def amain(args):
@@ -338,6 +302,9 @@ def main():
 
     if args.selftest:
         sys.exit(selftest())
+
+    p.error("Hardware BLE disabled in iteration 2. Use: python multiroom_app.py --demo. "
+            "Physical validation requires a separate reviewed authorization/change.")
 
     try:
         sys.exit(asyncio.run(amain(args)))

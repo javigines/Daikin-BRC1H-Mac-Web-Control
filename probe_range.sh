@@ -16,6 +16,9 @@
 #
 # Env overrides:
 #   BASE=http://host:8000   server URL (default http://127.0.0.1:8000)
+echo "DISABLED: hardware helpers require separate physical authorization and review." >&2
+exit 2
+
 set -uo pipefail
 
 BASE="${BASE:-http://127.0.0.1:8000}"
