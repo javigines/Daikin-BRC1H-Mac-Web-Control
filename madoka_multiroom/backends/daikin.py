@@ -222,11 +222,11 @@ class DaikinBackend:
             responses[cmd] = await self._request(cmd)
         return decode_snapshot(responses, fields)
 
-    async def _execute(self, operation):
+    async def _execute(self, operation, *, timeout=None):
         self.admit()
         async with self.lock:
             try:
-                async with asyncio.timeout(self.timeout):
+                async with asyncio.timeout(self.timeout if timeout is None else timeout):
                     async with self.budget.operations:
                         if self.closed:
                             raise BackendUnavailable("Adapter closing")
@@ -281,6 +281,7 @@ class DaikinBackend:
 
     async def close(self):
         # Mark closed before waiting, so queued work cannot start new exchanges.
+        self.lifecycle_context = getattr(self, 'lifecycle_context', 'explicit_close')
         self.closed = self.stopped = True
         self.latest = {}
         try:
@@ -300,9 +301,9 @@ class DaikinBackend:
                 self._cleanly_closed = True
         except (Exception, asyncio.CancelledError) as exc:
             if self.claimed:
+                self.cleanup_error = self.cleanup_error or type(exc).__name__
                 self.budget.quarantine(self.port, self)
                 self.state = SessionState.CLEANUP_UNCERTAIN
-                self.cleanup_error = self.cleanup_error or type(exc).__name__
             raise
 
     def resolve_offline_cleanup(self, *, reason, evidence):

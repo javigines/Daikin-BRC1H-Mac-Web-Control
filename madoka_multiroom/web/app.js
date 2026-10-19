@@ -33,8 +33,10 @@ function updateControls(root, card) {
   root.querySelector(".room-temp").textContent = stale ? "—" : (state.room_temp ?? "—");
   root.querySelector(".setpoint").textContent = stale || state.setpoint == null ? "—" : `${state.setpoint}°`;
   const connection = root.querySelector(".connection");
-  connection.textContent = localMode && data.enabled ? data.connection_status : !data.enabled ? "Deshabilitada" : stale ? "Sin datos recientes" : "Disponible";
-  connection.dataset.state = stale ? "offline" : "online";
+  connection.textContent = localMode && data.enabled ?
+    (data.connected && stale && data.connection_status === "Conectado" ? "Conectado · lectura pendiente" : data.connection_status) :
+    !data.enabled ? "Deshabilitada" : stale ? "Sin datos recientes" : "Disponible";
+  connection.dataset.state = (localMode ? !data.connected : stale) ? "offline" : "online";
   const disabled = card.busy || stale || !data.controls_enabled;
   for (const selector of [".power", ".decrease", ".increase", ".mode", ".fan"]) {
     const input = root.querySelector(selector);
@@ -100,6 +102,11 @@ function render(card, data) {
     detail.el.querySelector(".room-error").textContent = data.error || (isStale(data) ? "No hay una lectura reciente. Los controles están deshabilitados." : "");
     detail.el.querySelector(".history").disabled = failed;
     if (localMode) {
+      let diagnostics = detail.el.querySelector(".local-diagnostics");
+      if (!diagnostics) { diagnostics = document.createElement("details"); diagnostics.className = "local-diagnostics";
+        const title = document.createElement("summary"); title.textContent = "Diagnóstico del último cambio";
+        diagnostics.append(title, document.createElement("pre")); detail.el.append(diagnostics); }
+      diagnostics.querySelector("pre").textContent = JSON.stringify(data.last_operation?.diagnostics || data.diagnostic || [], null, 2);
       let targets = detail.el.querySelector(".local-targets");
       if (!targets) { targets = document.createElement("p"); targets.className = "local-targets muted"; detail.el.querySelector(".updated").before(targets); }
       targets.textContent = `Objetivo en frío: ${data.state.cooling_setpoint ?? "—"} °C · en calor: ${data.state.heating_setpoint ?? "—"} °C`;
@@ -142,11 +149,11 @@ async function mutate(card, action, value) {
     // Read the latest opposite restriction at confirmation time, not when the
     // dialog opened. Never replay a mutation after an ambiguous response.
     const body = typeof value === "function" ? value(await api(endpoint(card,"").replace(/\/$/,""))) : value;
-    card.data = await api(endpoint(card,action), body, nativeOffice ? action === "review-outcome" ? 210000 : 40000 : 10000);
+    card.data = await api(endpoint(card,action), body, nativeOffice ? action === "review-outcome" ? 210000 : localMode ? 150000 : 40000 : 10000);
   } catch (error) {
     card.error = localMode ? error.message : nativeOffice ? "STOP · respuesta no confirmada. No repitas la orden; consulta el resultado y solicita revisión." : error.name === "TimeoutError" ? "La operación ha tardado demasiado. Revisa el estado antes de repetir." : error.message;
     // A lost response does not establish whether the mutation applied.
-    card.data = {...card.data,stale:true,connected:false};
+    if (!localMode) card.data = {...card.data,stale:true,connected:false};
   } finally { card.busy = false; render(card,card.data); updateOverview(); }
 }
 function manual(card,action,value) {
@@ -374,7 +381,10 @@ async function poll() {
     for (const room of data.controllers) {
       const card = cards.get(room.id);
       if (!card) createCard(room);
-      else if (!card.busy && card.epoch === epochs.get(room.id)) render(card,room);
+      else if (!card.busy && card.epoch === epochs.get(room.id)) {
+        if (localMode) card.error = "";
+        render(card,room);
+      }
     }
     message.textContent = data.controllers.length ? "" : "No hay salas configuradas.";
   } catch (error) {
@@ -384,7 +394,7 @@ async function poll() {
 }
 function updateOverview() {
   const list = [...cards.values()];
-  document.querySelector("#online-count").textContent = `${list.filter(c => !isStale(c.data)).length} de ${list.length} salas disponibles`;
+  document.querySelector("#online-count").textContent = `${list.filter(c => localMode ? !failed && c.data.connected : !isStale(c.data)).length} de ${list.length} salas disponibles`;
 }
 setInterval(() => {
   for (const card of cards.values()) if (card.data.updated_at && Date.now()/1000-card.data.updated_at > card.data.stale_after_seconds) render(card,{...card.data,stale:true});

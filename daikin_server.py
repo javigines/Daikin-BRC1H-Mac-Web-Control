@@ -230,20 +230,33 @@ class Controller:
             fut = asyncio.get_running_loop().create_future()
             self.pending[cmd_id] = fut
             self.reasm.reset()
+            self.last_exchange = {"command": f"0x{cmd_id:04x}", "stage": "write", "frames_started": 0}
             try:
                 async def exchange():
                     for chunk in chunks:
                         if self.closed or self.failure or not self.client.is_connected:
                             raise ConnectionError(self.failure or "BLE link unavailable during write")
+                        self.last_exchange['frames_started'] += 1
                         await self.client.write_gatt_char(WRITE_CHAR, bytes(chunk), response=False)
+                    self.last_exchange['stage'] = 'response'
                     return await fut
                 payload = await asyncio.wait_for(exchange(), timeout=timeout)
                 if self.failure:
                     raise ConnectionError(self.failure)
-                return parse_objects(payload)
-            except (Exception, asyncio.CancelledError):
+                self.last_exchange.update(stage='decode', reply_hex=bytes(payload).hex())
+                objects = parse_objects(payload)
+                self.last_exchange['stage'] = 'complete'
+                return objects
+            except (Exception, asyncio.CancelledError) as exc:
+                self.last_exchange.update(error_class=type(exc).__name__, failure=self.failure,
+                    public_connected=bool(self.client and self.client.is_connected))
                 self._fail("BLE exchange interrupted; operator review/restart required")
-                await self._cleanup_after_error()
+                try:
+                    await self._cleanup_after_error()
+                except (Exception, asyncio.CancelledError) as cleanup:
+                    # Preserve the originating failure and record cleanup
+                    # uncertainty separately. Never turn a timeout into success.
+                    self.last_exchange['cleanup_error_class'] = type(cleanup).__name__
                 raise
             finally:
                 self.pending.pop(cmd_id, None)

@@ -226,6 +226,8 @@ class HardenedControllerBridge(Controller):
                     raise ValueError("Malformed chunk")
                 return
             command = cmd_id_of(payload)
+            if hasattr(self, 'last_exchange'):
+                self.last_exchange['reply_hex'] = bytes(payload).hex()
             if payload[1] != 0 or command not in self.pending or self.pending[command].done():
                 raise ValueError("Unexpected response")
             parse_objects(payload)
@@ -237,7 +239,9 @@ class HardenedControllerBridge(Controller):
                 seen.add(oid)
                 offset += 2 + payload[offset + 1]
             self.pending[command].set_result(payload)
-        except Exception:
+        except Exception as exc:
+            if hasattr(self, 'last_exchange'):
+                self.last_exchange.update(stage='notification', notification_error_class=type(exc).__name__)
             self._fail("Malformed or ambiguous response; STOP")
 
     async def exchange_ready(self, cmd_id, args=None, timeout=6):

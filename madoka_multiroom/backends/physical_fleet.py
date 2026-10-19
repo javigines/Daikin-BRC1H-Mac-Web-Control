@@ -58,9 +58,9 @@ class PreparedDaikinBackend(DaikinBackend):
                 self.state = SessionState.STOPPED
                 raise
 
-    async def _execute(self, operation):
+    async def _execute(self, operation, *, timeout=None):
         try:
-            return await super()._execute(operation)
+            return await super()._execute(operation, timeout=timeout)
         except BaseException:
             if self.claimed and self.stopped:
                 self.budget.quarantine(self.port, self)

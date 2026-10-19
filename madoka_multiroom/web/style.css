@@ -3,3 +3,6 @@
 @media(max-width:1000px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:650px){header{padding:20px 18px 14px}.demo-label{font-size:10px}.brand{font-size:24px}nav{padding:0 12px 14px;gap:2px}nav button{font-size:12px;padding:8px 10px;flex:1}main{padding:8px 16px 30px}h1{font-size:25px}.grid{grid-template-columns:1fr;gap:14px}.room{padding:20px}.card-top{min-height:30px}.ambient{margin:16px 0}.admin-panel,.lab-panel{padding:18px}.selects,.policy-limits,.desired-fields,.lab-panel section>div{gap:12px}.page-heading{gap:10px}.page-heading p{font-size:11px}.admin-actions button{width:100%}dialog{padding:18px}.actions button{flex:1}}
 
 .room{display:flex;flex-direction:column}.card-top{min-height:32px}.ambient{margin:12px 0 16px}.details{margin-top:auto}.operation-status:empty,#app-message:empty{display:none}
+
+.local-diagnostics pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;max-width:100%}
+.room:has(.local-configure) .connection{max-width:50%;flex-shrink:1;text-align:right}

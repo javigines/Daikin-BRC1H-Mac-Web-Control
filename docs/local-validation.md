@@ -1,5 +1,9 @@
 # Daikin Local: implementation review and offline evidence
 
+This records the original PR #11 candidate. The subsequent
+[power incident RCA](local-power-incident.md) supersedes its manual deadlines,
+ACK acceptance and availability/error handling, and records the new regressions.
+
 Base: master `e6822f126b3e61c36ec0665a1b68fc6af54422b9`. This candidate adds
 one local runtime, not another physical pilot. The [short operator guide](local.md)
 is the only installation/update and six-device check procedure for the new mode.

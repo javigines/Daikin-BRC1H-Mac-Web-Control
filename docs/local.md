@@ -75,6 +75,16 @@ write retries. **No se pudo confirmar el cambio** means do not assume success.
 not retry or retroactively confirm the old command. Restoration, when safe,
 is another deliberate click using the recorded initial value.
 
+A change may wait behind another room's communication; keep the page open and
+do not click again while it is pending. Local manual execution has a 90-second
+budget after up to 30 seconds of queue admission (120 seconds combined, excluding
+bounded cleanup). Connection and observation
+freshness are separate: **Conectado · lectura pendiente** disables controls until
+fresh data arrives. An uncertain effect can retain a healthy link and GET polling,
+while manual changes remain blocked. Optional **Más opciones → Diagnóstico del
+último cambio** records the failed phase without exposing native SDK identifiers.
+See the [power incident RCA](local-power-incident.md) for the correction and limits.
+
 Normal disconnections and old-session recovery are automatic when CoreBluetooth
 proves the device is disconnected. Otherwise the affected card explains the
 problem; other rooms continue. Do not edit SQLite or reset data. Technical
