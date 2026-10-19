@@ -1,40 +1,40 @@
-# Validación de iteración 2 · Mac A
+# Iteration 2 validation · Mac A
 
-Fecha 2026-10-19. **PASS offline / HOLD real**. Base PR1 abierta/draft verificada antes del desarrollo y antes de entrega: `bcb1bf8493881d1ee50b7558d17299346b0fb4ae`, rama `fix/ble-reliability-foundation`. Rama nueva `feature/multiroom-offline`, PR apilada a esa base. Este informe corresponde al diff de la PR; consultar su HEAD para identidad inmutable. No merge/deploy ni cambios en Mac B.
+Date 2026-10-19. **PASS offline / HOLD real**. Open/draft PR 1 base verified before development and delivery: `bcb1bf8493881d1ee50b7558d17299346b0fb4ae`, branch `fix/ble-reliability-foundation`. New branch `feature/multiroom-offline`, PR stacked on that base. This report describes that PR diff; consult its HEAD for immutable identity. No merge/deployment or changes on Mac B.
 
-## Evidencia ejecutada
+## Executed evidence
 
-| Comprobación | Resultado |
+| Check | Result |
 | --- | --- |
-| Base original antes de funcionalidades | 104 PASS / 0 FAIL; originales no editados |
-| Suite final Python3.12.15 | 227 PASS / 0 FAIL / 1 warning, 4.27s |
-| Suite final Python3.14.8 | 227 PASS / 0 FAIL / 1 warning, 6.34s |
-| Ambos selftests Python3.12 | ALL PASSED; código puro, sin BLE |
-| Chromium real, integration/browser_demo.py | PASS, 0 errores JavaScript |
-| Compilación Python y node --check app.js | PASS |
-| Dependencias con uv pip check | 36 paquetes compatibles |
-| Venv limpio instalando solo requirements-dev | 33 paquetes resueltos/instalados; 227 PASS / 0 FAIL / 1 warning, 4.15s |
+| Original baseline before functionality |104 PASS / 0 FAIL; originals unmodified|
+| Final Python 3.12.15 suite |227 PASS / 0 FAIL / 1 warning, 4.27s|
+| Final Python 3.14.8 suite |227 PASS / 0 FAIL / 1 warning, 6.34s|
+| Both Python 3.12 selftests |ALL PASSED; pure code without BLE|
+| Real Chromium, integration/browser_demo.py |PASS, 0 JavaScript errors|
+| Python compilation and node --check app.js |PASS|
+| Dependencies via uv pip check |36 compatible packages|
+| Clean venv installing only requirements-dev |33 packages resolved/installed; 227 PASS / 0 FAIL / 1 warning, 4.15s|
 
-Warning único por ejecución: StarletteDeprecationWarning sobre httpx en TestClient (sugiere httpx2). No se cambió el cliente por una migración ajena al alcance. `pip` no estaba instalado en el venv gestionado de desarrollo; verificación de dependencias ejecutada con `uv pip check`, no se declara pip check exitoso.
+One warning per run: StarletteDeprecationWarning for httpx in TestClient (suggests httpx 2). The client was not changed for an unrelated migration. `pip` was absent from the managed development venv; dependency verification used `uv pip check`, not a claimed successful pip check.
 
-Versiones probadas: fastapi0.146.0, uvicorn0.54.0, pydantic2.14.1, bleak3.0.2 (solo tests legacy), pytest9.1.1, httpx0.28.1, starlette1.9.0, Playwright1.64.0. Rangos de requirements no son lock reproducible ni auditoría CVE; futuras resoluciones deben repetir esta validación.
+Tested versions: fastapi 0.146.0, uvicorn 0.54.0, pydantic 2.14.1, bleak 3.0.2 (legacy tests only), pytest 9.1.1, httpx 0.28.1, starlette 1.9.0, Playwright 1.64.0. Requirements ranges are not a reproducible lock or CVE audit; future resolutions must repeat validation.
 
-## Escenarios que representan las pruebas
+## Scenarios represented by tests
 
-Config0/1/6 y duplicados/inválidos; seis instancias con locks/estados/latencias/históricos aislados; semáforo/deadline incluyendo wait; busy409 y cancelación; fallo sala3 sin impacto en otras; cierre y startup sin huérfanos; SQLite mismo timestamp/reinicio/cursor/importación original con/sin filtro y hash de origen inalterado; identidad/entorno de DB; imports DEMO sin Bleak ni legacy; real/CLIs fallan antes de hardware; Host/Origin/token/body/rate/inputs estrictos.
+Config 0/ 1/ 6 and duplicate/invalid values; six instances with isolated locks/state/latencies/history; semaphore/deadline including wait; busy 409/cancellation; room 3 failure without affecting others; shutdown/startup without orphan tasks; SQLite same timestamp/restart/cursor/import with/without filter and unchanged source hash; DB identity/environment; DEMO imports without Bleak/legacy; real/CLIs fail before hardware; strict Host/Origin/token/body/rate/inputs.
 
-Políticas: FREE/MONITOR/ENFORCE, cuatro campos independientes, desired nunca derivado de observed, confirmaciones/estabilidad/flapping/repeated timestamp, cooldown/reloj atrás/reinicio, presupuesto persistente sin reset automático, prevención de correcciones infinitas, auto-on OFF default y guarda3lecturas/30s/una vez, mantenimiento/suspensión/vencimiento, STOP errores/cancelación, registros y paginación; SQLite fallido en administración, STOP, recuperación y reset repetidos.
+Policies: FREE/MONITOR/ENFORCE, four independent fields, desired never derived from observed, confirmations/stability/flapping/repeated timestamp, cooldown/backward clock/restart, persistent budget without automatic reset, prevention of infinite correction, auto-on OFF default plus 3 readings/ 30s/one-use guard, maintenance/suspension/expiry, STOP on errors/cancellation, records/pagination; SQLite failure in administration, STOP, recovery and repeated resets.
 
-Integración Chromium: servidor CLI DEMO real en loopback/puerto efímero con DB temporal; browser→HTTP→Simulator→SQLite. Seis tarjetas, las cuatro operaciones por sala, tres políticas via formulario, cambios externos, corrección selectiva, eventos/historial, fallo/recuperación aislados; reinicio servidor con navegador abierto y token nuevo; stale configurable5s; nombres y errores hostiles como texto; desktop1440px/móvil390px sin overflow con administración abierta. No usa un backend simulado para sustituir la API: todos los backends funcionales son los simuladores que incluye la aplicación. Dos interceptaciones HTTP prueban fallo/render de frontend y se retiran.
+Chromium integration: real DEMO CLI server on loopback/ephemeral port with temporary DB; browser→HTTP→Simulator→SQLite. Six cards, four operations per room, three policies through forms, external changes, selective correction, events/history, isolated failure/recovery; server restart with browser open/new token; configurable 5s stale; hostile names/errors rendered as text; desktop 1440 px/mobile 390 px without overflow and administration open. The API is not replaced by a mock: functional backends are the application's simulators. Two HTTP interceptions test frontend failure/rendering and are removed afterward.
 
-El primer E2E detectó overflow móvil con nombre largo: corregido y repetición completa PASS. Capturas en `artifacts/demo-desktop.png` y `artifacts/demo-mobile.png` no versionadas, contienen los casos hostiles inertes de prueba. Previsualización normal independiente en8000, cerrada después de revisión; puede iniciarse con el comando README.
+First E2E found mobile overflow with a long name: corrected, complete rerun PASS. Untracked screenshots in `artifacts/demo-desktop.png` and `artifacts/demo-mobile.png` contain inert hostile-string test cases. Separate normal preview on 8000, closed after review; restart using the README command.
 
-## Revisión independiente
+## Independent review
 
-Auditoría inicial read-only antes de funcionalidades y revisión completa del diff por agente independiente. Detectó ocho P2 del código nuevo/documentación de instalación, todos tratados: frescura, deadline, token, Pydantic, rollback de política, poller al fallar STOP, latch ante segundo fallo y dependencias de venv limpio. Reproducciones inyectadas incorporadas a suite. **Resultado final independiente: PASS offline / HOLD Bluetooth real**; diff completo y documentación revisados, suite independiente227 PASS/0 FAIL/1 warning, diff --check PASS y104 originales intactos. Sin hallazgos materiales abiertos en la nueva ruta DEMO. Ninguna revisión offline levanta HOLD físico.
+Initial read-only audit before functionality and complete independent-agent diff review. Eight P2 findings in new code/installation documentation, all treated: freshness, deadline, token, Pydantic, policy rollback, poller after failed STOP, latch after second failure, clean-venv dependencies. Injected reproductions are included in the suite. **Final independent result: PASS offline / HOLD real Bluetooth**; complete diff/documentation reviewed, independent suite 227 PASS/ 0 FAIL/ 1 warning, diff --check PASS, original 104 tests intact. No material findings remain open in the new DEMO path. No offline review lifts the physical HOLD.
 
-## Frontera
+## Boundary
 
-Mac A: fuente, simuladores, tests, Chromium y SQLite temporales/DEMO. Mac B: **NO MODIFICADO**. HARDWARE_BLE: **NOT_TESTED**. PRODUCTION_CHANGED: **NO**. Sin SSH, scan, pairing, conexión, write BLE, permisos BT, restricciones nativas, instalador, servicios, LaunchAgents, horarios o acciones masivas. El hecho de instalar dependencias Bleak para preservar tests no inicializa hardware.
+Mac A: source, simulators, tests, Chromium and temporary/DEMO SQLite. Mac B: **NOT MODIFIED**. HARDWARE_BLE: **NOT_TESTED**. PRODUCTION_CHANGED: **NO**. No SSH, scan, pairing, connection, BLE write, Bluetooth permissions, native restrictions, installer settings, services, LaunchAgents, schedules or bulk commands. Installing Bleak dependencies to preserve tests does not initialize hardware.
 
-Antes de uso físico: [gates y autorizaciones de políticas](control-policies.md), [arquitectura](multiroom-architecture.md) y [handoff offline Mac B](mac-b-offline-iteration-2.md). Seguir estado por evidencia; demo satisfactoria no certifica hardware ni producción.
+Before physical use: [policy gates/authorizations](control-policies.md), [architecture](multiroom-architecture.md), [offline Mac B handoff](mac-b-offline-iteration-2.md). Classify state by evidence; successful demo does not certify hardware or production.

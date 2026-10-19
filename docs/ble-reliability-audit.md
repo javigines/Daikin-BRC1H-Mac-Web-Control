@@ -1,103 +1,62 @@
-# Iteración 1 — auditoría de fiabilidad BLE
+# Iteration 1 — BLE reliability audit
 
-Fecha: 2026-10-19 (Europe/Madrid). **PASS offline / HOLD para BLE real.**
+Date: 2026-10-19 (Europe/Madrid). **PASS offline / HOLD real BLE.**
 
-## Identidad y frontera
+## Identity and boundary
 
-- Fork oficial: <https://github.com/javigines/Daikin-BRC1H-Mac-Web-Control>.
-- Base auditada: `origin/master`, `3b3985ee5a6b93ed994a56331d13435986ca2f8a`.
+- Official fork: <https://github.com/javigines/Daikin-BRC1H-Mac-Web-Control>.
+- Audited base: `origin/master`, `3b3985ee5a6b93ed994a56331d13435986ca2f8a`.
 - `origin` fetch/push: `https://github.com/javigines/Daikin-BRC1H-Mac-Web-Control.git`.
-- Checkout nuevo, inicialmente limpio; rama `fix/ble-reliability-foundation`.
-- Upstream atribuido: <https://github.com/txsl/cool-vibes>.
-- Mac A: desarrollo y pruebas offline. Python del sistema sin modificar;
-  intérpretes y paquetes de prueba dentro de `.venv/` ignorado por Git.
-- Mac B: **NO MODIFICADO**, sin SSH ni acceso directo. Inventario y seis mandos
-  fuera del alcance de esta ejecución. Sus resultados previos son aportados por
-  el propietario, no pruebas realizadas aquí.
-- HARDWARE_BLE: **NOT_TESTED**. PRODUCTION_CHANGED: **NO**. Sin scans, pairing,
-  órdenes reales, servidor activo, LaunchAgents, configuración de macOS, merge
-  o deploy. Los tests de lifespan lanzan solo pollers simulados o stubs.
+- New checkout, initially clean; branch `fix/ble-reliability-foundation`.
+- Attributed upstream: <https://github.com/txsl/cool-vibes>.
+- Mac A: development and offline tests. System Python unchanged; test interpreters and packages inside Git-ignored `.venv/`.
+- Mac B: **NOT MODIFIED**, without SSH or direct access. The inventory and six controllers were outside this execution's scope. Their previous results were supplied by the owner, not tests performed here.
+- HARDWARE_BLE: **NOT_TESTED**. PRODUCTION_CHANGED: **NO**. No scans, pairing, real commands, running server, LaunchAgents, macOS configuration, merge or deployment. Lifespan tests launch only simulated pollers or stubs.
 
-## Defectos demostrados y correcciones
+## Demonstrated defects and corrections
 
-| Defecto en la base | Evidencia y resultado |
+| Defect in the base | Evidence and result |
 | --- | --- |
-| Reensamblado prematuro | Dividía por 20 aunque cada fragmento reserva un byte de índice. Ejecutando el módulo original offline: longitud declarada 20 emite 19 bytes en fragmento 0; 39/40 emiten 38 en fragmento 1. Ahora divide por 19 y exige tamaño exacto antes de entregar. |
-| Índices y fragmentos inválidos aceptados | Se agregaban fragmentos sin comprobar índice, orden, tamaño ni inicio. Ahora rechaza continuaciones huérfanas, duplicadas, saltos, fragmentos cortos/largos y longitud inválida; descarta el mensaje incompleto. Un índice 0 inicia/reinicia el mensaje. |
-| Respuestas malformadas aparentaban éxito parcial | `parse_objects` devolvía los objetos previos al valor truncado e ignoraba un byte final sin cabecera. Ahora rechaza longitud inválida y TLV truncados con `ValueError`; mantiene objetos de tamaño cero para respuestas de campos no soportados. |
-| Suscripción fallida dejaba cliente reutilizable | `ensure_connected` retornaba si el transporte estaba conectado aunque `start_notify` hubiese fallado. Ahora listo significa conectado y suscrito; cualquier fallo de setup dispara limpieza y detiene la sesión. |
-| Desconexión no despertaba peticiones ni invalidaba caché | El callback solo cambiaba un booleano. Ahora falla el Future pendiente, invalida caché/reensamblador y bloquea nuevas operaciones. Ignora callbacks de clientes antiguos. |
-| Timeout solo cubría respuesta | Una escritura podía quedar fuera del plazo. Ahora el timeout abarca todas las escrituras y la respuesta; se conserva el error original y se intenta limpiar tras fallo/cancelación. |
-| Una respuesta tardía podía satisfacer la petición siguiente | El diccionario usa solo `cmd_id`. Tras un intercambio ambiguo no hay otra petición en esa sesión; respuestas tardías se ignoran y no se reintenta. |
-| Limpieza ocultaba fallos | El spike suprimía errores de stop/disconnect y anunciaba cierre limpio. Ahora intenta ambas llamadas, limita cada una, propaga fallos de limpieza si no existe error primario y registra errores secundarios conservando el primario. Nunca certifica seguridad física. |
-| Estado obsoleto y carreras de cierre | La revisión independiente reprodujo reconexión cuando `is_connected` cambiaba antes del callback y avance de setup después de solicitar cierre. Corregido con latch para cliente existente no listo y guards después de scan/connect. |
-| Apagado podía saltarse recursos | Excepciones del poller podían evitar disconnect/store.close. `lifespan` cancela y espera el poller; bloques `finally` intentan desconectar y cerrar SQLite incluso si otro paso falla. Sustituye `on_event` obsoleto. |
-| README no coincidía con temperaturas | Afirmaba preservar el setpoint inactivo. Se documenta el comportamiento real: mismo entero para cooling/heating y bloque completo de campos. No se cambia esa política. |
+| Premature reassembly | Divided by 20 although each fragment reserves one index byte. Running the original module offline: declared length 20 emits 19 bytes in fragment 0; 39/ 40 emit 38 in fragment 1. Now divides by 19 and requires exact size before delivery. |
+| Invalid indices and fragments accepted | Appended fragments without checking index, order, size or start. Now rejects orphan/duplicate continuations, gaps, short/long fragments and invalid lengths; discards incomplete messages. Index 0 starts/restarts a message. |
+| Malformed replies appeared partially successful | `parse_objects` returned objects preceding a truncated value and ignored a final byte without a header. Now rejects invalid lengths and truncated TLVs with `ValueError`; preserves zero-length objects for unsupported fields. |
+| Failed subscription left a reusable client | `ensure_connected` returned when transport was connected even if `start_notify` had failed. Ready now means connected and subscribed; any setup failure triggers cleanup and stops the session. |
+| Disconnection did not wake requests or invalidate cache | The callback only changed a boolean. Now fails the pending Future, invalidates cache/reassembler and blocks new operations. Ignores callbacks from old clients. |
+| Timeout covered only the reply | A write could remain outside the deadline. Timeout now covers all writes and the reply; preserves the original error and attempts cleanup after failure/cancellation. |
+| A late reply could satisfy the next request | The dictionary uses only `cmd_id`. An ambiguous exchange ends that session; late replies are ignored and no retry occurs. |
+| Cleanup concealed failures | The spike suppressed stop/disconnect errors and announced clean shutdown. Now attempts both calls, bounds each, propagates cleanup failures if no primary error exists and logs secondary errors while preserving the primary. Never certifies physical safety. |
+| Stale state and shutdown races | Independent review reproduced reconnection when `is_connected` changed before the callback and setup advancing after close was requested. Fixed with a latch for an existing unready client and guards after scan/connect. |
+| Shutdown could skip resources | Poller exceptions could prevent disconnect/store.close. `lifespan` cancels and awaits the poller; `finally` blocks attempt disconnection and SQLite closure even if another step fails. Replaces deprecated `on_event`. |
+| README contradicted temperature behavior | Claimed to preserve the inactive setpoint. The actual behavior is documented: same integer for cooling/heating and the complete field block. That policy is unchanged. |
 
-## Decisiones de ciclo de vida
+## Lifecycle decisions
 
-Se mantiene un solo cliente y un lock por controlador. Las peticiones se
-serializan a nivel de intercambio, no a nivel de toda una lectura de estado de
-cinco comandos. Una cancelación mientras se espera el lock no toca el enlace y
-no perjudica a la petición activa. Una cancelación después de iniciar setup o
-intercambio obliga a STOP y libera el lock; futuras operaciones fallan de forma
-explícita, sin quedarse bloqueadas. Recuperación: inspección del propietario y
-creación deliberada de una sesión nueva/reinicio manual, nunca bucle de restart.
+One client and lock per controller are retained. Requests serialize individual exchanges, not an entire five-command status read. Cancellation while waiting for the lock does not touch the link or harm the active request. Cancellation after setup or an exchange starts requires STOP and releases the lock; future operations fail explicitly instead of hanging. Recovery requires owner inspection and deliberate creation of a new session/manual restart, never a restart loop.
 
-El servidor hace un solo intento de setup: búsqueda con timeout interno de
-10 s y límite externo de 12 s, conexión 20 s, suscripción 20 s. Intercambio
-por defecto 6 s. El spike conserva hasta 120 s para un único setup, para dejar
-tiempo al prompt, pero elimina los reintentos de conexión/suscripción por
-comparación de mensajes de error. Aborta en el primer fallo de consulta (5 s).
-Un fallo de descubrimiento también queda detenido para revisión.
+The server makes one setup attempt: discovery with a 10s internal timeout and 12s outer limit, connection 20s, subscription 20s. Default exchange timeout 6s. The spike retains up to 120s for one complete setup to allow time for the prompt, but removes connection/subscription retries based on error-message comparisons. It aborts on the first query failure (5s). Discovery failure is also latched for review.
 
-`ble_lifecycle.py` es un helper pequeño compartido, sin dependencias nuevas.
-Ejecuta stop-notify cuando el backend informa conectado y luego disconnect,
-también tras connect parcial. Cada llamada tiene timeout de 10 s; la tarea de
-limpieza está protegida frente a cancelaciones repetidas del llamador. Un error
-de stop-notify no impide intentar disconnect. Fallos de limpieza quedan visibles;
-no se borra el cliente tras una limpieza fallida en el servidor.
+`ble_lifecycle.py` is a small shared helper without new dependencies. It calls stop-notify when the backend reports connected and then disconnect, including after partial connection. Each call has a 10s timeout; the cleanup task is shielded from repeated caller cancellation. A stop-notify error does not prevent attempting disconnect. Cleanup failures remain visible; the server does not discard the client after failed cleanup.
 
-**Los plazos son límites cooperativos de asyncio.** Si una implementación
-ignora la cancelación, `wait_for` puede tardar más. Esto no equivale a un límite
-físico ni a garantía de liberación del transporte nativo.
+**Deadlines are cooperative asyncio limits.** If an implementation ignores cancellation, `wait_for` can take longer. This is neither a physical bound nor a guarantee that native transport was released.
 
-## Tests y entorno
+## Tests and environment
 
-Línea base ejecutada antes de cambios en Mac A, Python 3.14.8: **34 PASS,
-0 FAIL, 25 warnings**, ambos selftests PASS, `pip check` PASS. Después se repitió
-la base original en un directorio temporal con Python 3.12.15: mismos resultados.
+Baseline executed before changes on Mac A, Python 3.14.8: **34 PASS, 0 FAIL, 25 warnings**, both selftests PASS, `pip check` PASS. The original baseline was then repeated in a temporary directory with Python 3.12.15: identical results.
 
-Suite final en Mac A:
+Final suite on Mac A:
 
-| Entorno aislado | Total | PASS | FAIL | Warnings | Selftests |
+| Isolated environment | Total | PASS | FAIL | Warnings | Selftests |
 | --- | ---: | ---: | ---: | ---: | --- |
-| CPython 3.14.8, macOS arm64 | 104 | 104 | 0 | 1 | ambos PASS |
-| CPython 3.12.15, macOS arm64 | 104 | 104 | 0 | 1 | ambos PASS |
+| CPython 3.14.8, macOS arm64 |104|104|0|1|both PASS|
+| CPython 3.12.15, macOS arm64 |104|104|0|1|both PASS|
 
-Los 34 tests originales permanecen sin modificaciones. Los nuevos cubren
-fronteras de 4–255 bytes, duplicados/secuencias/tamaños inválidos, mensajes
-incompletos, TLV truncados, respuesta correcta frente a otro comando, reuse del
-cliente, serialización, timeout de escritura/respuesta, fallos de setup,
-desconexión con petición pendiente, callbacks antiguos, cierre durante setup,
-cancelación en cada fase, waiter cancelado, cleanup fallido/lento/cancelado
-repetidamente, spike de un solo intento, setpoints iguales y shutdown con fallo
-del poller/disconnect. `tests/conftest.py` impide cargar Bleak real durante la
-suite; cada simulación sustituye explícitamente ese stub.
+The 34 original tests remain unmodified. New tests cover 4–255-byte boundaries, invalid duplicates/sequences/sizes, incomplete messages, truncated TLVs, correct versus wrong-command replies, client reuse, serialization, write/reply timeout, setup failures, disconnect with a pending request, old callbacks, close during setup, cancellation in every phase, cancelled waiters, failed/slow/repeatedly-cancelled cleanup, a single-attempt spike, equal setpoints and shutdown with poller/disconnect failure. `tests/conftest.py` prevents loading real Bleak during the suite; each simulation explicitly replaces that stub.
 
-Versiones principales verificadas: Bleak 3.0.2, FastAPI 0.146.0, Uvicorn 0.54.0,
-pytest 9.1.1, httpx 0.28.1, Starlette 1.9.0, Pydantic 2.14.1, PyObjC 12.2.2.
-[Snapshot completo de Python 3.12](tested-macos-py312.txt). `pip check`/`uv pip
-check` PASS. El único warning restante es la deprecación de httpx en TestClient
-de Starlette; se conserva el cliente del suite original, sin migración ajena a
-BLE ni silenciamiento del warning.
+Verified main versions: Bleak 3.0.2, FastAPI 0.146.0, Uvicorn 0.54.0, pytest 9.1.1, httpx 0.28.1, Starlette 1.9.0, Pydantic 2.14.1, PyObjC 12.2.2. [Full Python 3.12 snapshot](tested-macos-py312.txt). `pip check`/`uv pip check` PASS. The only remaining warning is Starlette TestClient's httpx deprecation; the original suite client is retained without an unrelated BLE migration or warning suppression.
 
-Los requirements mantienen sus mínimos originales (`bleak>=0.22`, etc.), sin
-añadir paquetes de runtime ni cambiar de proveedor. El snapshot describe el
-entorno probado; no es un lock de todas las plataformas. No se certifica cada
-versión admitida por esos rangos ni Python 3.10/3.11/3.13.
+Requirements retain their original minimums (`bleak>=0.22`, etc.), without adding runtime packages or changing providers in iteration 1. The snapshot describes the tested environment, not a lock for all platforms. It does not certify every version admitted by those ranges or Python 3.10/ 3.11/ 3.13.
 
-Comandos de verificación (cada comando debe terminar correctamente):
+Verification commands (each command must succeed):
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -111,54 +70,18 @@ Comandos de verificación (cada comando debe terminar correctamente):
 git diff --check
 ```
 
-## Riesgos pendientes, priorizados
+## Prioritized remaining risks
 
-1. **ALTO — estado nativo durante cancelación de connect y seguridad del mando.**
-   Inspección estática de Bleak 3.0.2 en Mac A: `CentralManagerDelegate.connect`
-   cancela la conexión nativa ante `asyncio.TimeoutError`; no tiene el mismo
-   tratamiento explícito para `CancelledError`. `BleakClientCoreBluetooth.disconnect`
-   retorna si el periférico aún no figura Connected. Puede quedar un intento
-   nativo Connecting aunque las llamadas públicas terminen. Es un riesgo de
-   backend no reproducido físicamente, no un hecho observado en Mac B. No se
-   llama a APIs privadas ni se afirma liberación nativa por pasar mocks.
-2. **ALTO — pairing y desconexión específicos de cada BRC1H.** Ni el éxito de
-   `stop_notify`/`disconnect` ni el timeout prueban que el mando siga respondiendo.
-   Requiere propietario presencial y una prueba autorizada con un solo mando.
-   Ninguna estrategia de reconexión automática queda habilitada. Un supervisor
-   externo con autorestart podría sortear el latch: no usarlo en validación.
-3. **MEDIO — ausencia de transaction id/checksum en el contrato usado.** Se
-   compara command id, no identidad de transacción. El latch evita reutilizar
-   una respuesta tras timeout/cancelación, pero no distingue un duplicado tardío
-   después de una petición ya exitosa de la respuesta de la siguiente petición
-   del mismo comando. Una notificación espontánea con el mismo id tampoco puede
-   distinguirse. No inventar delays como garantía; hacen falta capturas físicas
-   y especificación si se observa ese comportamiento.
-4. **MEDIO — supuestos del protocolo y temperaturas.** Se conserva framing de
-   fragmentos no finales de 19 bytes y final exacto, sin padding; falta confirmar
-   con capturas de los seis modelos/firmwares. Un fragmento 0 reemplaza un
-   mensaje incompleto porque no hay identificador de mensaje. El reensamblador
-   no tiene timer propio; request/disconnect lo reinician y un mensaje está
-   limitado por su longitud de un byte. Se conserva rounding a entero y envío
-   igual cooling/heating, incluido bloque de límites a cero. No generalizar
-   afirmaciones históricas del upstream a los mandos de oficina.
-5. **BAJO — matriz de dependencias abierta.** Las versiones instaladas pasan
-   offline; una resolución futura puede cambiar. Conservar versiones/SHA de
-   cada validación y revisar antes de usar otro entorno.
+1. **HIGH — native state during connect cancellation and controller safety.** Static inspection of Bleak 3.0.2 on Mac A: `CentralManagerDelegate.connect` cancels native connection on `asyncio.TimeoutError`; it has no equivalent explicit treatment for `CancelledError`. `BleakClientCoreBluetooth.disconnect` returns if the peripheral is not yet Connected. A native Connecting attempt may remain even after public calls return. This is a backend risk not physically reproduced, not an observed fact on Mac B. No private APIs are called and passing mocks does not establish native release.
+2. **HIGH — pairing and disconnection specific to each BRC1H.** Neither successful `stop_notify`/`disconnect` nor a timeout proves the controller still responds. Requires an owner physically present and an authorized one-controller test. No automatic reconnection strategy is enabled. An external autorestart supervisor could bypass the latch: do not use one during validation.
+3. **MEDIUM — no transaction ID/checksum in the contract used.** Command ID is compared, not transaction identity. The latch avoids reusing a reply after timeout/cancellation but cannot distinguish a late duplicate after an already-successful request from the next same-command reply. An unsolicited notification with the same ID is also indistinguishable. Do not invent delays as guarantees; physical captures and a specification are needed if this occurs.
+4. **MEDIUM — protocol and temperature assumptions.** Retains19-byte non-final fragments and an exact final fragment, without padding; captures for the six models/firmwares remain necessary. Fragment 0 replaces an incomplete message because no message identifier exists. The reassembler has no timer of its own; request/disconnect reset it and messages are bounded by their one-byte length. Integer rounding and equal cooling/heating writes, including the zeroed limits block, are retained. Do not generalize upstream historical claims to the office controllers.
+5. **LOW — open dependency matrix.** Installed versions pass offline; future resolution may differ. Preserve versions/SHA for each validation and review before using another environment.
 
-## Revisión y siguiente paso
+## Review and next step
 
-Revisión independiente read-only mediante otro agente: reprodujo las dos
-carreras descritas, se corrigieron y se añadieron regresiones; sin BLE, SSH ni
-ediciones por el revisor. Revalidación independiente del diff completo,
-incluido rechazo de TLV truncados y documentos: PASS en ambos intérpretes y
-ambos selftests. También se impide seguir enviando fragmentos tras perder el
-enlace durante una escritura multiparte.
+Independent read-only review by another agent reproduced the two described races; both were corrected with regressions. No BLE, SSH or edits by the reviewer. Independent revalidation of the complete diff, including rejection of truncated TLVs and documentation: PASS on both interpreters and both selftests. Further fragments are also prevented after link loss during a multipart write.
 
-No se añade licencia: el árbol base no incluye LICENSE/COPYING/NOTICE y GitHub
-devuelve `licenseInfo: null` para upstream. Se conserva atribución. Ausencia de
-licencia explícita no concede por sí sola permiso general de redistribución;
-aclarar derechos con upstream antes de distribuir derivados.
+No license is added: the base tree contains no LICENSE/COPYING/NOTICE and GitHub returns `licenseInfo:null` for upstream. Attribution is retained. Absence of an explicit license does not itself grant general redistribution permission; clarify rights with upstream before distributing derivatives.
 
-Siguiente paso: revisión humana de la PR draft y ejecución manual **solo de la
-fase offline** del [handoff Mac B](mac-b-validation.md). El GO para una prueba
-BLE real es posterior, separado y requiere intervención física disponible.
+Next step: human review of the draft PR and manual execution of **only the offline phase** of the [Mac B handoff](mac-b-validation.md). GO for a real BLE test is later, separate and requires available physical intervention. Historical physical commands in that handoff remain blocked on iteration 2+ branches; they are not authorization to reactivate them.
