@@ -1,10 +1,10 @@
-# Daikin BRC1H Mac Web Control · multiroom offline
+# Daikin BRC1H Mac Web Control · offline multiroom
 
-**Iteración 2: PASS offline / HOLD Bluetooth real.** Esta rama solo ejecuta simuladores: seis salas independientes, dashboard, históricos y políticas de protección. No escanea, conecta, empareja ni escribe sobre Bluetooth. No está habilitada para producción.
+**Iteration 2: PASS offline / HOLD real Bluetooth.** This branch runs simulators only: six independent rooms, a dashboard, history and protection policies. It does not scan, connect, pair or write over Bluetooth. It is not enabled for production.
 
-## Iniciar la DEMO
+## Start the DEMO
 
-Python **3.12+** (probado en 3.12.15 y 3.14.8). En una carpeta de desarrollo independiente:
+Python **3.12+** (tested on 3.12.15 and 3.14.8). Use a separate development directory:
 
 ```bash
 python3.12 -m venv .venv-demo
@@ -12,13 +12,13 @@ python3.12 -m venv .venv-demo
 .venv-demo/bin/python multiroom_app.py --demo --config config.example.json --db demo_history.db --port 8000
 ```
 
-Abrir [http://127.0.0.1:8000](http://127.0.0.1:8000). Finalizar con un solo Ctrl+C y esperar al cierre de la aplicación. El servidor solo admite `127.0.0.1`, puerto no privilegiado y un worker. Sin configuración usa seis UUID ficticios. No colocar el inventario de oficina en el ejemplo versionado.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Stop with one Ctrl+C and wait for application shutdown. The server accepts only `127.0.0.1`, an unprivileged port and one worker. Without a configuration file it uses six fictional UUIDs. Never put the office inventory in the tracked example.
 
-Cada tarjeta permite temperatura, modo, ventilador, encendido y consulta de su histórico. El laboratorio simula errores, desconexiones, retardos, recuperación y cambios externos. Los controles se deshabilitan ante datos obsoletos o error; otra sala puede seguir funcionando.
+Each card supports temperature, mode, fan speed, power and its own history. The laboratory simulates errors, disconnections, delays, recovery and external changes. Controls are disabled when data is stale or the room has an error; other rooms can continue working.
 
-En **Administrar protección** se elige `FREE`, `MONITOR` o `ENFORCE`, los campos protegidos y un estado deseado autorizado. La última lectura nunca se convierte automáticamente en estado deseado. `ENFORCE` corrige exclusivamente simuladores con confirmaciones, estabilización, cooldown, presupuesto persistente y STOP. Encendido automático deshabilitado por defecto. Mantenimiento, suspensión temporal, rearme manual y eventos se administran por sala. No se activan bloqueos nativos Daikin.
+**Administrar protección** selects `FREE`, `MONITOR` or `ENFORCE`, protected fields and an explicitly authorized desired state. The latest reading never automatically becomes desired state. `ENFORCE` corrects simulators only, with confirmations, stabilization, cooldown, persistent attempt budgets and STOP. Automatic power-on is disabled by default. Maintenance, temporary suspension, manual reset and events are managed per room. No native Daikin locks are activated.
 
-## Pruebas offline
+## Offline tests
 
 ```bash
 .venv-demo/bin/python -m pytest -q
@@ -26,7 +26,7 @@ En **Administrar protección** se elige `FREE`, `MONITOR` o `ENFORCE`, los campo
 .venv-demo/bin/python brc1h_spike.py --selftest
 ```
 
-Integración opcional con Chromium real, API y SQLite temporales (sin hardware):
+Optional real-Chromium integration against temporary HTTP/SQLite resources, without hardware:
 
 ```bash
 .venv-demo/bin/python -m pip install -r requirements-browser.txt
@@ -34,23 +34,25 @@ Integración opcional con Chromium real, API y SQLite temporales (sin hardware):
 .venv-demo/bin/python integration/browser_demo.py
 ```
 
-Resultados y límites: [validación](docs/iteration-2-validation.md). Se conservan sin cambios los 104 tests originales. Capturas locales en `artifacts/`, excluidas de Git.
+Results and limits: [validation](docs/iteration-2-validation.md). The original 104 tests remain unchanged. Local screenshots are saved in `artifacts/`, excluded from Git.
 
-## Documentación
+## Documentation
 
-- [Auditoría integral del repositorio](docs/full-code-audit.md): defectos confirmados, riesgos y tratamientos.
-- [Arquitectura, API, configuración y migración SQLite](docs/multiroom-architecture.md).
-- [Políticas, salvaguardas y bloqueo nativo documentado por Daikin](docs/control-policies.md).
-- [Procedimiento exclusivamente offline para Mac B](docs/mac-b-offline-iteration-2.md).
-- [Auditoría BLE anterior](docs/ble-reliability-audit.md) y [handoff físico anterior](docs/mac-b-validation.md): evidencia histórica; no autorizan ejecutar hardware desde esta rama.
+- [Full repository audit](docs/full-code-audit.md): confirmed defects, risks and treatment.
+- [Architecture, API, configuration and SQLite migration](docs/multiroom-architecture.md).
+- [Policies, safeguards and native locks documented by Daikin](docs/control-policies.md).
+- [Exclusively offline Mac B procedure](docs/mac-b-offline-iteration-2.md).
+- [Previous BLE audit](docs/ble-reliability-audit.md) and [previous physical handoff](docs/mac-b-validation.md): historical evidence, not authorization to run hardware from this branch.
+- [Upstream contribution readiness](docs/upstream-contribution-readiness.md): candidate patches, dependencies, compatibility and unresolved licensing.
+- [English documentation normalization](docs/english-documentation-normalization.md): translation scope and checks.
 
-## Compatibilidad y seguridad
+## Compatibility and security
 
-Los entrypoints reales `daikin_server.py` y `brc1h_spike.py` solo permiten `--selftest`; los helpers de depuración/rangos están bloqueados. `multiroom_app.py --real` falla antes de abrir la DB o importar un backend BLE. La plantilla LaunchAgent no arranca ni reinicia automáticamente y no se ha instalado. No hay horarios ni órdenes masivas activas.
+The physical entrypoints `daikin_server.py` and `brc1h_spike.py` allow only `--selftest`; debugging/range helpers are blocked. `multiroom_app.py --real` fails before opening the DB or importing a BLE backend. The LaunchAgent template neither starts nor restarts automatically and has not been installed. No schedules or bulk commands are active.
 
-La API antigua `/api/*` devuelve 410: migrar a `/api/controllers/{id}/...`, nunca a posiciones de arrays. El nuevo histórico se separa por identificador, usa una DB distinta y no se debe abrir desde código antiguo. Se ofrece importación explícita a una copia nueva del histórico original; véase arquitectura.
+The old `/api/*` API returns 410: migrate to `/api/controllers/{id}/...`, never array positions. New history is separated by identifier, uses a different DB and must not be opened with old code. An explicit import into a new copy of the original history is available; see architecture.
 
-El token efímero local protege mutaciones frente a CSRF; **no autentica usuarios**. Un proceso o usuario local puede obtenerlo. No se debe publicar el puerto ni habilitar BLE hasta implementar autenticación/autorización de propietario, controles operacionales y las pruebas físicas documentadas. Las notificaciones de MONITOR son eventos y avisos en dashboard; no se envían mensajes externos.
+The ephemeral local token protects mutations against CSRF; **it does not authenticate users**. A local process or user can obtain it. Do not publish the port or enable BLE until owner authentication/authorization, operational controls and the documented physical tests are implemented. MONITOR notifications are events and dashboard notices; no external messages are sent.
 
 ## Credits
 
@@ -59,4 +61,4 @@ El token efímero local protege mutaciones frente a CSRF; **no autentica usuario
 - Reference implementation: [pymadoka](https://github.com/mduran80/pymadoka).
 - BLE library retained for legacy tests: [bleak](https://github.com/hbldh/bleak).
 
-El upstream auditado no declara licencia explícita. Se conservan las atribuciones; este fork no añade licencia ni infiere permisos de redistribución. Aclarar derechos con el autor antes de redistribuir derivados. Las afirmaciones históricas sobre unidades de otros entornos no certifican los seis mandos de esta oficina.
+The audited upstream declares no explicit license. Attribution is preserved; this fork adds no license and infers no redistribution rights. Clarify rights with the author before redistributing derivatives or making a formal contribution. Historical claims about units in other environments do not certify these six office controllers.

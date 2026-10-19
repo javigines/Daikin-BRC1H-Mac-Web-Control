@@ -1,14 +1,12 @@
-# Handoff Mac B — validación posterior, no ejecutada por Codex
+# Mac B handoff — later validation, not executed by Codex
 
-Mac A es desarrollo. Mac B es el Mac mini de oficina con seis BRC1H y Python
-3.12. Los escaneos, dos selftests y 34 tests previos de Mac B son evidencia
-aportada por el propietario, no ejecuciones de esta iteración.
+Mac A is development. Mac B is the office Mac mini with six BRC1H units and Python 3.12. Its previous scans, two selftests and 34 tests are evidence supplied by the owner, not executions from this iteration.
 
-## 1. Preflight local, solo lectura
+Historical iteration 1 procedure: physical entrypoints are blocked in iteration 2 and later. Section 4 preserves the original proposal, but its command cannot run from these branches. A separately reviewed implementation and authorization are required; do not remove guards to follow this document.
 
-Ejecutar personalmente en Mac B, sin SSH. No instalar servicios, modificar
-permisos de macOS ni detener procesos a ciegas. Revisar los resultados antes de
-seguir; si aparece un controlador activo, STOP y acordar cómo cerrarlo.
+## 1. Local read-only preflight
+
+Run personally on Mac B, without SSH. Do not install services, change macOS permissions or stop processes blindly. Review results before continuing; if a controller client is active, STOP and agree how to close it.
 
 ```bash
 cd "$HOME/madoka-test/cool-vibes"
@@ -22,26 +20,19 @@ lsof -nP -iTCP -sTCP:LISTEN | grep -E 'Python|python|:80 |:8000 ' || true
 ls -l "$HOME/madoka-test/madoka_inventory.json"
 ```
 
-Revisar también LaunchAgents con nombres distintos y cualquier proceso de
-control conocido. La ausencia de coincidencias no certifica ausencia de todos
-los clientes BLE; comprobar la sesión gráfica y cerrar la app Madoka del móvil
-solo cuando se prepare la prueba autorizada. No imprimir ni subir el inventario.
-Si no existe Python 3.12, STOP: resolverlo con el propietario sin cambiar el
-Python o venv existentes.
+Also review differently named LaunchAgents and any known controller process. No matches do not certify that all BLE clients are absent; check the graphical session and close the phone's Madoka app only when preparing the authorized test. Do not print or upload the inventory. If Python 3.12 is absent, STOP: resolve with the owner without changing existing Python or virtual environments.
 
-## 2. Obtener el cambio sin alterar el checkout ni el venv existentes
+## 2. Obtain changes without altering the existing checkout or virtual environment
 
-Verificar que `origin` es el fork oficial antes de usar estos comandos. Un
-worktree separado evita checkout/reset/stash sobre el entorno anterior. Si el
-directorio de destino ya existe, STOP y revisarlo, no borrarlo.
+Verify `origin` is the official fork before these commands. A separate worktree avoids checkout/reset/stash in the previous environment. If the target directory exists, STOP and inspect; do not delete it.
 
 ```bash
 git fetch origin master fix/ble-reliability-foundation
 MADOKA_REVIEW_SHA="$(git rev-parse origin/fix/ble-reliability-foundation)"
 git log -1 --format=fuller "$MADOKA_REVIEW_SHA"
 git diff --stat origin/master..."$MADOKA_REVIEW_SHA"
-# Comparar MADOKA_REVIEW_SHA con el SHA exacto de la PR y el informe final.
-# STOP si no coincide; no aceptar una rama que haya cambiado sin revisión.
+# Compare MADOKA_REVIEW_SHA with the exact PR SHA and final report.
+# STOP on mismatch; do not accept a changed branch without review.
 git worktree add --detach "$HOME/madoka-test/cool-vibes-ble-iteration1" "$MADOKA_REVIEW_SHA"
 cd "$HOME/madoka-test/cool-vibes-ble-iteration1"
 python3.12 -m venv .venv
@@ -52,12 +43,9 @@ python3.12 -m venv .venv
 git rev-parse HEAD
 ```
 
-Guardar las versiones y el SHA junto con los resultados. Los requirements
-originales tienen límites inferiores, no un lock: una instalación futura puede
-resolver versiones distintas. No actualizar el venv anterior, copiar `.env`,
-inventario, bases de datos ni LaunchAgents a este worktree.
+Save versions and SHA with results. Original requirements have lower bounds rather than a lock: later installation may resolve different versions. Do not update the previous virtual environment or copy `.env`, inventory, databases or LaunchAgents into this worktree.
 
-## 3. Pruebas offline, permitidas sin contacto BLE
+## 3. Offline tests, allowed without BLE contact
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -68,60 +56,26 @@ launchctl list | grep -Ei 'daikin|madoka|cool.?vibes' || true
 git status --short
 ```
 
-La suite sustituye `bleak` por un backend prohibido por defecto; los tests que
-lo necesitan inyectan clientes simulados. Ambos selftests terminan antes de
-crear el servidor, escanear o conectar. Comparar preflight y postflight y
-devolver resultados, warnings, versiones y SHA. No ejecutar los scripts sin
-`--selftest` en esta fase. **STOP aquí.**
+The suite replaces `bleak` with a forbidden backend by default; tests that need it inject simulated clients. Both selftests finish before server creation, scanning or connection. Compare preflight/postflight and return results, warnings, versions and SHA. Do not run the scripts without `--selftest` in this phase. **STOP here.**
 
-## 4. Primera prueba BLE, bloqueada hasta nueva autorización
+## 4. First BLE test, blocked until new authorization
 
-Requisitos previos: autorización explícita posterior para **un solo** UUID del
-inventario local y una persona físicamente junto al mando con capacidad de
-intervención. Identificar el mando por inventario y ubicación, no solo RSSI.
-Registrar hora, modelo, firmware disponible, estado visible y bond previo.
-Todos los demás clientes deben estar desconectados; sin servidor web, poller,
-LaunchAgent, scripts de escritura ni bucles de reinicio activos.
+Prerequisites: later explicit authorization for **one** UUID in the local inventory and a person physically beside the controller who can intervene. Identify by inventory and location, not RSSI alone. Record time, model, available firmware, visible state and previous bond. All other clients must be disconnected; no web server, poller, LaunchAgent, write scripts or restart loops may be active.
 
-Tras esa autorización, desde una sesión gráfica visible en Mac B y desde el
-worktree revisado, el propietario sustituirá el valor por el UUID aprobado:
+After that authorization, from a visible graphical session on Mac B and a reviewed worktree, the owner would substitute the approved UUID. This historical command is blocked in iteration 2+ and requires a new reviewed change before execution:
 
 ```bash
-MADOKA_APPROVED_UUID='REEMPLAZAR_POR_UUID_APROBADO'
-# Solo después del GO posterior y con el UUID comprobado:
+MADOKA_APPROVED_UUID='REPLACE_WITH_APPROVED_UUID'
+# Only after the later GO and UUID verification:
 .venv/bin/python -u brc1h_spike.py --address "$MADOKA_APPROVED_UUID" --timeout 8
 ```
 
-El spike hace un escaneo previo y un único intento de conexión/suscripción,
-con hasta 120 s para el conjunto del establecimiento (incluido el prompt de
-emparejamiento). Solo consulta potencia, modo, setpoint y sensor. Cada intercambio
-tiene un límite de 5 s; la limpieza intenta stop-notify y disconnect con 10 s
-por llamada. Estos límites dependen de que el backend coopere con la cancelación.
-No reintenta automáticamente. En Bleak 3.0.2, cancelar durante el estado nativo Connecting puede dejar un
-intento pendiente aunque disconnect público retorne: STOP, sin reintentos y con
-verificación presencial. No confundir una lectura con ausencia total de
-riesgo: conectar, emparejar y desconectar afectan al estado BLE.
+The spike performs preliminary discovery and one connection/subscription attempt, allowing up to 120s for complete setup including the pairing prompt. It only queries power, mode, setpoint and sensor. Each exchange has a 5s limit; cleanup attempts stop-notify and disconnect with 10s per call. Limits depend on cooperative backend cancellation. No automatic retry. In Bleak 3.0.2, cancellation during native Connecting may leave an attempt pending even when public disconnect returns: STOP, no retries and physical verification. A read-only query is not an absence of all risk: connection, pairing and disconnection affect BLE state.
 
-**STOP** ante UUID ambiguo, prompt inesperado, error/PIN de pairing, timeout,
-fallo de conexión/suscripción/lectura/limpieza, caída del enlace, cambio inesperado
-del mando o pérdida de respuesta física. No aceptar prompts de otro dispositivo.
-No repetir la prueba, forzar reconexiones, desemparejar, cambiar permisos ni
-reiniciar alimentación automáticamente. Si necesita abortar, un solo Ctrl+C y
-esperar el resultado de limpieza; no repetir Ctrl+C, cerrar Terminal o usar
-`kill -9`. Si se bloquea, mantener STOP y decidir presencialmente la intervención.
+**STOP** on ambiguous UUID, unexpected prompt, pairing error/PIN, timeout, connection/subscription/read/cleanup failure, link loss, unexpected controller change or loss of physical responsiveness. Do not accept another device's prompt. Do not repeat the test, force reconnection, unpair, change permissions or power-cycle automatically. To abort, press Ctrl+C once and wait for cleanup results; do not repeat Ctrl+C, close Terminal or use `kill -9`. If stuck, maintain STOP and decide intervention in person.
 
-Tras la salida, guardar stdout/stderr y código de salida, verificar físicamente
-que el mando sigue respondiendo a sus controles locales y observarlo sin abrir
-otra conexión. `BLE cleanup calls completed; hardware state unverified` solo
-informa de llamadas terminadas. No certifica desconexión segura para el BRC1H.
-No probar los otros cinco mandos hasta revisar esta evidencia.
+After exit, save stdout/stderr and exit code, physically verify local controller controls still respond and observe without opening another connection. `BLE cleanup calls completed; hardware state unverified` reports only completed calls. It does not certify safe disconnection for the BRC1H. Do not test the other five controllers before reviewing this evidence.
 
-## 5. Temperaturas: otra autorización posterior
+## 5. Temperatures: another later authorization
 
-La primera prueba no escribe. Para una futura prueba de `set_setpoint`, acordar
-un rango inocuo y una forma manual de restauración, registrar valores anteriores
-y posteriores de cooling/heating, modo, límites y pantalla. Verificar si el
-modelo admite setpoints independientes, si exige valores iguales, cómo redondea
-medios grados y si el bloque de límites a cero mantiene los límites efectivos.
-El código conserva el envío del mismo entero para ambos setpoints. No ejecutar
-`probe_range.sh`, `debug_setpoint.sh` ni el servidor como parte de este handoff.
+The first test does not write. A future `set_setpoint` test requires an agreed harmless range and manual restoration method, recording before/after cooling/heating values, mode, limits and screen state. Check whether the model accepts independent setpoints, requires equal values, how it rounds half degrees and whether the zeroed limits block preserves effective limits. Code retains the same integer for both setpoints. Do not run `probe_range.sh`, `debug_setpoint.sh` or the server as part of this handoff.

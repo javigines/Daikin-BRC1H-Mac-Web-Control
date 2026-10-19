@@ -1,52 +1,52 @@
-# Políticas por controlador y estado deseado
+# Per-controller policies and desired state
 
-## Semántica
+## Semantics
 
-Default `FREE`, sin campos protegidos ni encendido automático. Cada sala mantiene registro persistente distinto de la última observación. Desired solo cambia mediante API local autorizada: los controles ordinarios persisten intención antes de escribir; `/desired` establece intención sin orden inmediata. Una orden fallida conserva la intención autorizada y activa STOP; no se copia lectura ni se inventa éxito. Futuros horarios deberán entrar por el mismo servicio `administer/operate` con autorización de propietario y fuente de auditoría específica; no existe scheduler activo.
+Default `FREE`, no protected fields or automatic power-on. Each room keeps a persistent record separate from the latest observation. Desired state changes only through authorized local API actions: ordinary controls persist intent before writing; `/desired` sets intent without an immediate command. Failed commands retain authorized intent and activate STOP; readings are not copied and success is not invented. Future schedules must use the same `administer/operate` service with owner authorization and a specific audit source; there is no active scheduler.
 
-| Política | Desviación de un desired explícito | Escrituras automáticas |
+| Policy | Deviation from explicit desired state | Automatic writes |
 | --- | --- | --- |
-| FREE | Se registra, se acepta la observación y no se muestra aviso de restricción | Ninguna |
-| MONITOR | Se registra y avisa en dashboard/eventos | Ninguna |
-| ENFORCE | Se registra y avisa; se consideran solo campos protegidos | Acotadas, únicamente Simulator |
+| FREE | Recorded; accepts observation without a restriction notice | None |
+| MONITOR | Recorded and shown in dashboard/events | None |
+| ENFORCE | Recorded and shown; only protected fields are considered | Bounded, Simulator only |
 
-Aceptar en FREE no reemplaza desired. Cambiar política no crea desired ni rearma STOP/presupuesto. `protected` permite seleccionar de forma independiente setpoint/mode_id/fan_id/power_on; un campo sin desired o sin lectura no se corrige. Las desviaciones se registran para todos los campos con intención, incluso no protegidos, con origen `unknown`. No se atribuyen al mando físico, a una persona o a otra app.
+Accepting in FREE does not replace desired. Changing policy does not create desired or reset STOP/budget. `protected` independently selects setpoint/mode_id/fan_id/power_on; a field without desired or a reading is not corrected. Deviations are recorded for every intended field, including unprotected fields, with `unknown` origin. They are not attributed to a physical controller, person or another app.
 
-## Reconciliación acotada
+## Bounded reconciliation
 
-- Confirmaciones consecutivas del mismo valor observado (2–5, default2); repetir el mismo timestamp no confirma. Cambios de valor o ausencia del campo reinician su candidatura.
-- Estabilización monótona 1–300 s, default5. Cooldown persistente 1–600 s, default15. Si reloj civil retrocede no se elude cooldown.
-- Un campo por operación, dentro del lock por sala y deadline. Reserva durable de intento **antes** del efecto. Lectura posterior registra correction_observed solo si el valor se observa; no desencadena otra corrección en esa misma operación.
-- Máximo total 1–5 intentos por rearme de propietario, default3. No se renueva presupuesto después de un éxito. Al agotarse y reaparecer desviación confirmada se activa STOP persistente; no hay ciclos infinitos con otro controlador. Persisten intentos, último intento, STOP y auto_on_used tras reinicio; confirmaciones se descartan.
-- Error, timeout o cancelación activa STOP y error de sala. Recuperar simulador no rearma correcciones. Presupuesto/STOP solo se rearma con acción administrativa y motivo. Si falla SQLite, se revierte administración y se mantiene STOP en memoria; el poller sigue vivo, inactivo hasta recuperación explícita.
-- Cambios de desired, política y restricciones invalidan candidaturas. No se relaja automáticamente el control tras error ni se reconecta agresivamente.
+- Consecutive confirmations of the same observed value (2–5, default 2); a repeated timestamp does not confirm. Value changes or a missing field reset its candidacy.
+- Monotonic stabilization 1–300s, default 5. Persistent cooldown 1–600s, default 15. A backward wall-clock jump cannot bypass cooldown.
+- One field per operation, inside room lock/deadline. Durable attempt reservation **before** effect. Readback records correction_observed only if the value is observed; it cannot trigger another correction in that operation.
+- Total maximum 1–5 attempts per owner reset, default 3. Success does not renew the budget. Exhaustion followed by another confirmed deviation activates persistent STOP; no infinite fight with another controller. Attempts, last attempt, STOP and auto_on_used survive restart; confirmations are discarded.
+- Error, timeout or cancellation activates STOP and room failure. Recovering a simulator does not rearm corrections. Budget/STOP reset requires an administrative action and reason. SQLite failure rolls back administration and retains in-memory STOP; poller remains alive, inactive until explicit recovery.
+- Desired/policy/restriction changes invalidate candidates. Errors do not silently relax control or trigger aggressive reconnect.
 
-Para autoencendido se necesita además `power_on` protegido, desired true autorizado y `allow_auto_on=true` explícito. Mínimos efectivos: tres lecturas, 30 s de estabilización y 60 s entre intentos. Solo un autoencendido por presupuesto/rearme, aunque cambie la política o reinicie proceso. No activarlo por defecto. Apagado automático también exige protección/desired y límites normales. Son salvaguardas de simulación; no prueban seguridad del sistema térmico real.
+Automatic power-on additionally requires protected `power_on`, authorized desired true and explicit `allow_auto_on=true`. Effective minimums: three readings, 30s stabilization, 60s between attempts. Only one automatic power-on per budget/reset, even across policy changes or process restart. Never enable by default. Automatic power-off also requires protection/desired and normal bounds. These are simulation safeguards, not proof of actual thermal-system safety.
 
-Mantenimiento inhibe correcciones hasta desactivación explícita; suspensión temporal dura hasta 3600 s y vence usando deadline civil persistente. Ambas pueden combinarse y requieren motivo; vencimiento se audita. Las lecturas y desviaciones continúan; no bloquean órdenes explícitas del propietario. La suspensión no concede nuevo presupuesto. Se puede recuperar comunicación y revisar estado aun con STOP; el rearme es separado.
+Maintenance inhibits corrections until explicit deactivation; temporary suspension lasts up to 3600s and expires using a persistent wall-clock deadline. They can be combined and require a reason; expiry is audited. Readings/deviations continue; neither blocks explicit owner commands. Suspension grants no new budget. Communication can be recovered and reviewed while STOP remains; reset is separate.
 
-## Eventos y administración
+## Events and administration
 
-Eventos por ID de sala: desired_changed, policy_changed, deviation/deviation_cleared, correction_attempt, correction_observed, error, stop_budget_exhausted, restrictions_changed, suspension_expired, budget_reset y cambios de laboratorio. Registro append-only en aplicación; no es un ledger antimanipulación. API/eventos paginados. MONITOR avisa localmente; no envía correo ni mensajes externos. Token DEMO acredita petición local, no identidad de propietario: antes de producción es obligatorio auth/RBAC y trazabilidad de actor real.
+Per-room events: desired_changed, policy_changed, deviation/deviation_cleared, correction_attempt, correction_observed, error, stop_budget_exhausted, restrictions_changed, suspension_expired, budget_reset and laboratory changes. Append-only in the application, not a tamper-proof ledger. Paginated API/events. MONITOR alerts locally; it sends no email or external messages. DEMO token proves a local request, not owner identity: production requires auth/RBAC and real-actor traceability.
 
-## Bloqueo nativo documentado por Daikin
+## Native lock documented by Daikin
 
-Consulta oficial 2026-10-19. La documentación describe **Function lock** desde Madoka Assistant para familias BRC1H519 y BRC1H52:
+Official sources consulted 2026-10-19. Documentation describes **Function lock** using Madoka Assistant for BRC1H519 and BRC1H52 families:
 
-- [BRC1H519W/K/S7, 4P513689-1D, 2019.05](https://www.daikin.eu/content/dam/document-library/Installer-reference-guide/ctrl/individual-control-systems/BRC1H519W7,K7,S7_4PEN513689-1D_2019_05_Installer%20and%20user%20reference%20guide_English.pdf), §14.5.28, pp impresas41–42.
-- [BRC1H52W/K/S7, 4P813200-1A, 2026.01](https://www.daikin.eu/content/dam/document-library/Installer-reference-guide/ctrl/individual-control-systems/brc1h52k7/BRC1H52K7.BRC1H52S7.BRC1H52W7_Installer.User%20reference%20guide_4PEN813200-1A_English.pdf), Function lock, pp impresas112–114.
+- [BRC1H519W/K/S7, 4P513689-1D, 2019.05](https://www.daikin.eu/content/dam/document-library/Installer-reference-guide/ctrl/individual-control-systems/BRC1H519W7,K7,S7_4PEN513689-1D_2019_05_Installer%20and%20user%20reference%20guide_English.pdf), §14.5.28, printed pages 41–42.
+- [BRC1H52W/K/S7, 4P813200-1A, 2026.01](https://www.daikin.eu/content/dam/document-library/Installer-reference-guide/ctrl/individual-control-systems/brc1h52k7/BRC1H52K7.BRC1H52S7.BRC1H52W7_Installer.User%20reference%20guide_4PEN813200-1A_English.pdf), Function lock, printed pages 112–114.
 
-Ambas guías enumeran bloqueo de menú, setpoint, fan speed, operation mode y ON/OFF, además de otras funciones y modos individuales. Explican que controles bloqueados muestran bloqueo o desaparecen/tachan en menú; bloquear un modo activo no lo detiene inmediatamente, pero impide seleccionarlo de nuevo después de cambiar. Son capacidades documentadas para variantes de esas guías; no certifican versión/modelo/configuración de los seis mandos de oficina ni compatibilidad con todas sus instalaciones.
+Both guides list locks for menu, setpoint, fan speed, operation mode and ON/OFF, plus other functions and individual modes. Blocked controls show a lock or disappear/are crossed out in menus; locking the active mode does not immediately stop it but prevents reselecting it after changing. These capabilities are documented for the guides' variants; they do not certify the six office controllers' version/model/configuration or compatibility with every installation.
 
-Ese bloqueo aplica restricciones en el controlador mediante herramientas oficiales. Nuestra reconciliación detecta una diferencia y puede restaurar intención más tarde en simulación: durante el intervalo el cambio externo existe. No equivale a impedir pulsaciones ni a Function lock. No se han deducido ni implementado comandos BLE de bloqueo, no se han cambiado ajustes de instalador y no se ha conectado Madoka Assistant a hardware. Estado mostrado por API/dashboard: **NOT_APPLIED_NOT_VERIFIED**. No hay botón que prometa activar un bloqueo físico.
+Native locking applies restrictions in the controller through official tools. Our reconciliation detects a difference and can restore intent later in simulation: the external change exists during that interval. It does not prevent button presses or implement Function lock. No lock BLE commands have been inferred or implemented; installer settings have not changed and Madoka Assistant has not been connected to hardware. API/dashboard status: **NOT_APPLIED_NOT_VERIFIED**. No button promises physical locking.
 
-## Gates antes de ENFORCE físico
+## Gates before physical ENFORCE
 
-1. Autorización separada del propietario, por mando/UUID/modelo/firmware, campos y valores, ventanas de prueba, responsable presencial, criterios STOP y restauración. Inventario privado y correspondencia sala↔mando comprobados físicamente.
-2. Resolver HOLD de CoreBluetooth y validación semántica (size0/unsupported/campos obligatorios, respuesta/ACK frente a lectura real). Primero una sesión read-only de un único mando, supervisada; verificar setup, cancelación, desconexión, sleep/reinicio y cleanup sin reintentos.
-3. Autorizar por separado una orden manual conocida dentro de límites admitidos y verificar con lectura y pantalla física, preservando/restaurando valores previos. Confirmar significado de modos, fan, rangos, redondeo y setpoints independientes por variante.
-4. Antes de reconciliar: auth/RBAC de propietario, emergencia/STOP manual, coordinación con otras apps, límites térmicos, presupuesto duradero con fallos disco/energía y eventos, mantenimiento/suspensión y pruebas de no pelea. Mantener auto-on prohibido; su evaluación requiere autorización y análisis de riesgo adicionales específicos.
-5. Habilitación real necesitaría nuevo código/backend/guard revisados y permiso explícito. Pilotar MONITOR de un mando antes de cualquier ENFORCE; ampliar capacidad gradualmente solo con evidencia nativa por modelo y Mac B. Nunca conectar seis automáticamente como test offline.
-6. Si se desea bloqueo nativo, autorización separada y procedimiento oficial Madoka Assistant supervisado; verificar ajuste leído, comportamiento de cada función y restauración. No usar comandos desconocidos ni permisos de instalador implícitos.
+1. Separate owner authorization per controller/UUID/model/firmware, field/value, test window, physically present operator, STOP/restoration criteria. Private inventory and room↔controller identity checked physically.
+2. Resolve CoreBluetooth HOLD and semantic validation (size 0/unsupported/required fields, response/ACK versus real observation). First one supervised read-only session on one controller; verify setup, cancellation, disconnection, sleep/restart and cleanup without retries.
+3. Separately authorize one known manual command within accepted limits and verify readback/physical screen, preserving/restoring previous values. Confirm mode/fan meaning, ranges, rounding and independent setpoints by variant.
+4. Before reconciliation: owner auth/RBAC, manual emergency STOP, coordination with other apps, thermal limits, durable budgets under disk/power failure, events, maintenance/suspension and anti-fight tests. Keep auto-on forbidden; evaluating it requires further specific authorization and risk assessment.
+5. Real activation requires a new reviewed backend/code/guard change and explicit permission. Pilot MONITOR on one controller before any ENFORCE; expand gradually only with native evidence per model and Mac B. Never automatically connect six controllers as an offline test.
+6. For native locking, separate authorization and supervised official Madoka Assistant procedure; verify read-back setting, behavior of every function and restoration. No unknown commands or implied installer permission.
 
-Nada de lo anterior se ha ejecutado. Mac B NO MODIFICADO; HARDWARE_BLE NOT_TESTED; PRODUCTION_CHANGED NO.
+None of these steps has been executed. Mac B NOT MODIFIED; HARDWARE_BLE NOT_TESTED; PRODUCTION_CHANGED NO.
