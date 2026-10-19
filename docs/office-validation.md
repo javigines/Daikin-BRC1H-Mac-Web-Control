@@ -6,13 +6,13 @@ SET, native restriction, ledger reset or consumed-canary-marker change occurred.
 
 ## Actual integrated results
 
-The complete tree contains **530 tests** (not a sum of sibling PR results).
+The complete tree contains **531 tests** (not a sum of sibling PR results).
 
 | Validation | Result |
 | --- | --- |
-| Python 3.12.15 full suite, offline import guard | 530 PASS |
-| Python 3.14.8 full suite, offline import guard | 530 PASS |
-| New office transport/access/recovery tests | 66 PASS, included in 530 |
+| Python 3.12.15 full suite, offline import guard | 531 PASS |
+| Python 3.14.8 full suite, offline import guard | 531 PASS |
+| New office transport/access/recovery tests | 67 PASS, included in 531 |
 | Chromium simplified six-simulator UI | PASS, desktop/mobile, zero JavaScript errors |
 | Chromium six-room hardened wire contract | PASS, desktop/mobile, zero JavaScript errors |
 | Chromium existing authenticated native read-only mock | PASS, desktop/mobile, zero JavaScript errors |
@@ -52,7 +52,9 @@ reboot evidence, identity/revision scope, same-boot rejection, independent revie
 unknown identity, expiry/config/password/file restrictions and explicit GET-only
 uncertain review. Successful ownership release and unresolved write outcome are
 separate facts. Healthy observation resets the retry episode while a durable
-rolling admission limit prevents storms. A direct-client rate-limit test proves
+rolling admission limit prevents storms. A native operation-deadline regression holds all global slots longer than a
+ready-room deadline, then confirms the GET succeeds once capacity is available:
+another room's pairing cannot spuriously stop a healthy room. A direct-client rate-limit test proves
 five polling clients do not starve each other and an abusive client is throttled.
 
 Browser office tests use the real HTTPS listener/API/UI, six closed native
@@ -86,8 +88,8 @@ reservation safely; retry episodes rearm after healthy observations with a durab
 rolling limit; owner/device temperature intersections and Auto fan restrictions
 are checked before transmission; office rate limiting is isolated by direct TLS
 client. Final independent disposition: **PASS for source/offline readiness; physical HOLD**.
-The reviewer independently reran all 66 office tests under the Python3.14 import
-guard (66 passed); no remaining reachable material findings were reported.
+The reviewer independently reran all 67 office tests under the Python 3.14 import
+guard (67 passed); no remaining reachable material findings were reported.
 Exact hosted CI is linked in the PR.
 Mocked cleanup success was explicitly not accepted as physical release evidence.
 

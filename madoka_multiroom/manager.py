@@ -5,6 +5,7 @@ The backend boundary is an async snapshot/apply/close interface, not BLE itself.
 """
 import asyncio
 import copy
+from contextlib import asynccontextmanager
 import logging
 import time
 from dataclasses import dataclass, field
@@ -98,6 +99,19 @@ class RoomManager:
             log.exception("Could not persist STOP for logical id %s", room.config.id)
             # stop() keeps the in-memory latch even if SQLite is unavailable.
 
+    @asynccontextmanager
+    async def operation_window(self, seconds):
+        # Another room can be pairing for 120s. Waiting for its global slot is
+        # not this ready room's wire operation and must not trip its deadline.
+        if self.native_office:
+            async with self.capacity:
+                async with asyncio.timeout(seconds):
+                    yield
+        else:
+            async with asyncio.timeout(seconds):
+                async with self.capacity:
+                    yield
+
     async def operate(self, room_id: str, action: str | None = None, value=None):
         if self.native_readonly and action is not None:
             raise RoomUnavailable("Native runtime is read-only")
@@ -123,28 +137,27 @@ class RoomManager:
             try:
                 if action:
                     room.policy.desired({FIELDS[action]: value})
-                async with asyncio.timeout(30 if self.native_readonly else room.config.queries.timeout_seconds):
-                    async with self.capacity:
-                        if self.closing:
-                            raise RoomUnavailable("Application closing")
-                        async def exchange():
-                            if action:
-                                await room.backend.apply(action, value)
-                                room.stats["writes"] += 1
-                            return await room.backend.snapshot(room.config.queries.fields)
-                        state = await exchange()
-                        intent = room.policy.observe(state, time.monotonic(), allow_correction=self.offline_fleet is None)
-                        if intent:
-                            self.store.append(room_id, int(time.time() * 1000), state)
-                            # The only automatic correction path is physically incapable
-                            # of reaching BLE. Never accept another backend here.
-                            if type(room.backend) is not Simulator:
-                                raise RoomUnavailable("Automatic correction backend rejected")
-                            key, desired = intent
-                            await room.backend.apply(ACTIONS[key], desired)
+                async with self.operation_window(30 if self.native_readonly else room.config.queries.timeout_seconds):
+                    if self.closing:
+                        raise RoomUnavailable("Application closing")
+                    async def exchange():
+                        if action:
+                            await room.backend.apply(action, value)
                             room.stats["writes"] += 1
-                            state = await room.backend.snapshot(room.config.queries.fields)
-                            room.policy.observe(state, time.monotonic(), allow_correction=False)
+                        return await room.backend.snapshot(room.config.queries.fields)
+                    state = await exchange()
+                    intent = room.policy.observe(state, time.monotonic(), allow_correction=self.offline_fleet is None)
+                    if intent:
+                        self.store.append(room_id, int(time.time() * 1000), state)
+                        # The only automatic correction path is physically incapable
+                        # of reaching BLE. Never accept another backend here.
+                        if type(room.backend) is not Simulator:
+                            raise RoomUnavailable("Automatic correction backend rejected")
+                        key, desired = intent
+                        await room.backend.apply(ACTIONS[key], desired)
+                        room.stats["writes"] += 1
+                        state = await room.backend.snapshot(room.config.queries.fields)
+                        room.policy.observe(state, time.monotonic(), allow_correction=False)
                 room.latest = state
                 room.updated_at = time.time()
                 room.updated_monotonic = time.monotonic()

@@ -317,3 +317,24 @@ def test_reconnect_episode_rearms_after_health_and_durable_rolling_budget(office
         assert office.budget.recent_admissions('room-1') == 3
         await backend.close()
     asyncio.run(case())
+
+
+def test_other_room_setup_slot_wait_is_outside_ready_room_deadline(office, monkeypatch):
+    async def case():
+        store = RoomStore(':memory:', mode='real')
+        manager = RoomManager(office.config.rooms, store, offline_fleet=office.fleet)
+        await ready(office)
+        # Model another room's pairing holding all global slots for longer than
+        # an ordinary ready read. Shorten only the 30s read window for this test.
+        real_timeout = asyncio.timeout
+        monkeypatch.setattr(asyncio, 'timeout', lambda seconds: real_timeout(.02 if seconds == 30 else seconds))
+        for _ in range(office.config.rooms.max_concurrent_operations): await manager.capacity.acquire()
+        task = asyncio.create_task(manager.operate('room-1'))
+        await asyncio.sleep(.04)
+        assert not task.done() and manager.room('room-1').failure is None
+        for _ in range(office.config.rooms.max_concurrent_operations): manager.capacity.release()
+        state = await task
+        assert state['connected'] and not state['error']
+        await manager.close()
+        store.close()
+    asyncio.run(case())

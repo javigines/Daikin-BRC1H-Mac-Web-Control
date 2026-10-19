@@ -25,7 +25,9 @@ request lock, backend, observations, history and failure state. Global setup and
 operation capacity is configurable from one to six; start commissioning at one.
 Connections persist between polls. Connection/subscription gets a shared 120s
 window after 15s discovery, bounded by the existing setup phase. Five GETs fit a
-30s aggregate deadline, with 6s per wire exchange. SET plus pre-read and readback
+30s aggregate deadline, with 6s per wire exchange. Waiting for another room's
+global capacity is outside the ordinary native read deadline, so a 120s pairing
+cannot falsely STOP an already prepared room. SET plus pre-read and readback
 uses the same aggregate deadline and is never a connection-setup path.
 
 Read-only recovery may reconnect only after verified application ownership
