@@ -64,6 +64,15 @@ def main():
                 page = browser.new_page(viewport={"width": 1440, "height": 1100})
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
+                # Navigation before room data arrives must hydrate the active view.
+                for section in ("admin","lab"):
+                    early = browser.new_page()
+                    early.route("**/api/controllers",lambda route: route.fulfill(json={"controllers":[]}))
+                    early.goto(base)
+                    early.locator(f'[data-view="{section}"]').click()
+                    early.unroute("**/api/controllers")
+                    expect(early.locator(f'#{section}-content .selected-room')).to_have_text(config["devices"][0]["name"],timeout=8000)
+                    early.close()
                 page.goto(base)
                 expect(page.locator(".room")).to_have_count(6)
                 expect(page.locator(".room-name").first).to_have_text(config["devices"][0]["name"])
@@ -71,96 +80,179 @@ def main():
                 assert page.locator(".room-name img").count() == 0
                 def card(i):
                     return page.locator(f'.room[data-id="room-{i}"]')
+                def nav(name):
+                    page.locator(f'[data-view="{name}"]').click()
+                def choose(section, i):
+                    nav(section)
+                    page.locator(f'#{section}-room').select_option(f"room-{i}")
+                def confirm(reason="Owner reviewed offline test"):
+                    page.locator("#confirm-reason").fill(reason)
+                    page.locator("#accept-confirm").click()
+                # Every existing control remains reachable through the detail.
                 for i in range(1, 7):
                     room = card(i)
                     expect(room.locator(".increase")).to_be_enabled()
                     room.locator(".increase").click()
                     expect(room.locator(".setpoint")).to_have_text("23°")
-                    room.locator(".mode").select_option(str(i % 6))
-                    expect(room.locator(".mode")).to_be_enabled()
-                    room.locator(".fan").select_option(str(i % 5 + 1))
-                    expect(room.locator(".fan")).to_be_enabled()
-                    room.locator(".power").click()
-                    expect(room.locator(".power")).to_be_enabled()
+                    room.locator(".details").click()
+                    detail = page.locator("#detail-content")
+                    detail.locator(".mode").select_option(str(i % 6))
+                    expect(detail.locator(".mode")).to_be_enabled()
+                    detail.locator(".fan").select_option(str(i % 5 + 1))
+                    expect(detail.locator(".fan")).to_be_enabled()
+                    detail.locator(".power").click()
+                    expect(detail.locator(".power")).to_be_enabled()
+                    expect(detail.locator(".updated")).to_contain_text("Última lectura")
+                    if i == 6:
+                        detail.locator(".history").click()
+                        expect(page.locator("#history-rows tr").first).to_be_visible()
+                        expect(page.locator("#history-title")).to_contain_text("Oficina norte")
+                        page.locator("#close-history").click()
+                    page.locator("#close-detail").click()
                 data = page.request.get(base + "/api/controllers").json()["controllers"]
                 assert [r["state"]["setpoint"] for r in data] == [23] * 6
                 assert [r["state"]["mode_id"] for r in data] == [i % 6 for i in range(1, 7)]
                 assert [r["state"]["fan_id"] for r in data] == [i % 5 + 1 for i in range(1, 7)]
-                # Three policies through actual admin forms; external change never updates desired.
-                for i, mode in [(1, "FREE"), (2, "MONITOR"), (3, "ENFORCE")]:
-                    room = card(i)
-                    room.locator(".protection-admin summary").click()
-                    room.locator(".policy-mode").select_option(mode)
-                    room.locator('.protected-fields input[value="setpoint"]').check()
-                    room.locator(".stabilization").fill("1")
-                    room.locator(".cooldown").fill("1")
-                    room.locator(".save-policy").click()
-                    expect(room.locator(".save-policy")).to_be_enabled()
-                    expect(room.locator(".policy-badge")).to_have_text(mode)
-                    room.locator(".external summary").click()
-                    room.locator(".external-temp").fill("20")
-                    room.locator(".apply-external").click()
-                    expect(room.locator(".apply-external")).to_be_enabled()
-                    if mode == "ENFORCE":
-                        expect(room.locator(".setpoint")).to_have_text("23°", timeout=8000)
-                    else:
-                        expect(room.locator(".setpoint")).to_have_text("20°")
-                expect(card(2).locator(".deviations")).to_contain_text("aviso")
-                expect(card(1).locator(".deviations")).to_contain_text("aceptada")
-                card(3).locator(".events").click()
+                assert page.locator(".room select,.room input,.room details").count() == 0
+                for i, mode in [(1,"FREE"),(2,"MONITOR"),(3,"ENFORCE")]:
+                    choose("admin",i)
+                    admin = page.locator("#admin-content")
+                    admin.locator(".policy-mode").select_option(mode)
+                    admin.locator('.protected-fields input[value="setpoint"]').check()
+                    admin.locator(".advanced summary").click()
+                    assert not admin.locator(".allow-auto-on").is_checked()
+                    admin.locator(".stabilization").fill("1")
+                    admin.locator(".cooldown").fill("1")
+                    admin.locator(".save-policy").click()
+                    expect(admin.locator(".save-policy")).to_be_enabled()
+                    choose("lab",i)
+                    lab = page.locator("#lab-content")
+                    lab.locator(".external-temp").fill("20")
+                    lab.locator(".apply-external").click()
+                    expect(lab.locator(".apply-external")).to_be_enabled()
+                    nav("rooms")
+                    expect(card(i).locator(".setpoint")).to_have_text("23°" if mode == "ENFORCE" else "20°",timeout=8000)
+                expect(card(2).locator(".protection-notice")).to_contain_text("Cambios detectados")
+                expect(card(1).locator(".protection-notice")).to_be_hidden()
+                choose("lab",3)
+                page.locator(".events").click()
                 expect(page.locator("#events-list")).to_contain_text("correction_observed")
                 page.locator("#close-events").click()
-                card(6).locator(".history").click()
-                expect(page.locator("#history-rows tr").first).to_be_visible()
-                expect(page.locator("#history-title")).to_contain_text("Oficina norte")
-                page.locator("#close-history").click()
-                # One room fails and recovers, while other controls remain usable.
-                room = card(4)
-                room.locator(".simulation:not(.external) summary").click()
-                room.locator(".sim-status").select_option("error")
-                room.locator(".apply-simulation").click()
-                expect(room.locator(".power")).to_be_disabled()
-                expect(card(5).locator(".power")).to_be_enabled()
-                room.locator(".sim-status").select_option("online")
-                room.locator(".apply-simulation").click()
-                expect(room.locator(".power")).to_be_enabled()
-                expect(room.locator(".deviations")).to_contain_text("STOP")
-                # Browser remains open over restart: polling gets a fresh mutation token.
-                old_token = page.request.get(base + "/api/session").json()["token"]
+                # Independent administrative actions require reasons and confirmation.
+                choose("admin",3)
+                admin = page.locator("#admin-content")
+                admin.locator(".toggle-maintenance").click()
+                page.locator("#cancel-confirm").click()
+                assert not page.request.get(base+"/api/controllers/room-3").json()["protection"]["maintenance"]
+                admin.locator(".toggle-maintenance").click()
+                confirm()
+                expect(admin.locator(".toggle-maintenance")).to_have_text("Finalizar mantenimiento")
+                admin.locator(".suspend-seconds").fill("300")
+                admin.locator(".suspend").click()
+                confirm()
+                expect(admin.locator(".restrictions-status")).to_contain_text("Suspensión hasta")
+                admin.locator(".toggle-maintenance").click()
+                # A remote suspension changed while the dialog was open must be
+                # preserved; waiting for a reason must not extend its deadline.
+                token = page.request.get(base+"/api/session").json()["token"]
+                remote = page.request.post(base+"/api/controllers/room-3/restrictions",
+                    headers={"X-Demo-Token":token},data={"maintenance":True,"suspend_seconds":180,"reason":"Other local admin changed suspension"}).json()
+                deadline = remote["protection"]["suspended_until"]
+                page.wait_for_timeout(1300)
+                confirm()
+                expect(admin.locator(".toggle-maintenance")).to_have_text("Activar mantenimiento")
+                current = page.request.get(base+"/api/controllers/room-3").json()["protection"]
+                assert abs(current["suspended_until"]-deadline) <= 1.1
+                expect(admin.locator(".restrictions-status")).to_contain_text("Mantenimiento inactivo")
+                expect(admin.locator(".restrictions-status")).to_contain_text("Suspensión hasta")
+                admin.locator(".resume").click()
+                confirm()
+                expect(admin.locator(".restrictions-status")).to_contain_text("Sin suspensión")
+                admin.locator(".reset-budget").click()
+                confirm()
+                expect(admin.locator(".reset-budget")).to_be_enabled()
+                # Faults and disconnection isolate a room; recovery does not reset policy STOP.
+                for status in ["error","disconnected"]:
+                    choose("lab",4)
+                    page.locator(".sim-status").select_option(status)
+                    page.locator(".apply-simulation").click()
+                    expect(page.locator(".apply-simulation")).to_be_enabled()
+                    nav("rooms")
+                    expect(card(4).locator(".power")).to_be_disabled()
+                    expect(card(5).locator(".power")).to_be_enabled()
+                    choose("lab",4)
+                    page.locator(".sim-status").select_option("online")
+                    page.locator(".apply-simulation").click()
+                    expect(page.locator(".apply-simulation")).to_be_enabled()
+                    nav("rooms")
+                    expect(card(4).locator(".power")).to_be_enabled()
+                    expect(card(4).locator(".protection-notice")).to_contain_text("detenida")
+                choose("lab",5)
+                page.locator(".sim-delay").fill("800")
+                page.locator(".apply-simulation").click()
+                expect(page.locator(".apply-simulation")).to_be_enabled()
+                nav("rooms")
+                card(5).locator(".power").click()
+                expect(card(5)).to_have_attribute("aria-busy","true")
+                expect(card(5).locator(".increase")).to_be_disabled()
+                expect(card(6).locator(".increase")).to_be_enabled()
+                expect(card(5)).to_have_attribute("aria-busy","false",timeout=8000)
+                choose("lab",5)
+                page.locator(".sim-delay").fill("0")
+                page.locator(".apply-simulation").click()
+                expect(page.locator(".apply-simulation")).to_be_enabled()
+                nav("rooms")
+                old_token = page.request.get(base+"/api/session").json()["token"]
                 stop()
                 expect(card(5).locator(".power")).to_be_disabled(timeout=8000)
                 start()
-                new_token = page.request.get(base + "/api/session").json()["token"]
-                assert old_token != new_token
+                assert old_token != page.request.get(base+"/api/session").json()["token"]
                 expect(card(5).locator(".power")).to_be_enabled(timeout=8000)
                 card(5).locator(".increase").click()
                 expect(card(5).locator(".setpoint")).to_have_text("23°")
-                expect(card(5).locator(".room-error")).to_have_text("")
-                # Distinct configurable stale threshold, even when HTTP keeps succeeding.
-                page.route("**/api/controllers", lambda route: route.fulfill(json={"controllers": []}))
+                expect(card(5).locator(".operation-status")).to_have_text("")
+                page.route("**/api/controllers",lambda route: route.fulfill(json={"controllers":[]}))
                 expect(card(5).locator(".power")).to_be_disabled(timeout=8000)
                 page.unroute("**/api/controllers")
                 expect(card(5).locator(".power")).to_be_enabled(timeout=8000)
-                # Local failure status is rendered as text, including hostile strings.
-                page.route("**/api/controllers/room-6/power", lambda route: route.fulfill(status=503,
-                    json={"detail": '<img src=x onerror="window.injected=true">'}))
+                page.route("**/api/controllers/room-6/power",lambda route: route.fulfill(status=503,json={"detail":'<img src=x onerror="window.injected=true">'}))
                 card(6).locator(".power").click()
-                expect(card(6).locator(".room-error")).to_contain_text("<img")
-                assert card(6).locator(".room-error img").count() == 0
+                expect(card(6).locator(".operation-status")).to_contain_text("<img")
+                assert card(6).locator(".operation-status img").count() == 0
                 page.unroute("**/api/controllers/room-6/power")
-                # Collapse admin/lab panels for overview screenshots.
-                page.evaluate("document.querySelectorAll('details').forEach(el => el.open = false)")
-                output = ROOT / "artifacts"
+                # Keyboard entry, modal focus containment, Escape and focus return.
+                button = card(2).locator(".details")
+                button.focus()
+                page.keyboard.press("Enter")
+                expect(page.locator("#close-detail")).to_be_focused()
+                page.keyboard.press("Tab")
+                assert page.evaluate("document.activeElement.closest('#detail-dialog') !== null")
+                page.keyboard.press("Escape")
+                expect(button).to_be_focused()
+                # Capture normal product content after hostile-string regression tests.
+                stop()
+                config["devices"][0]["name"] = "Recepción"
+                config_path.write_text(json.dumps(config))
+                start()
+                page.reload()
+                expect(page.locator(".room-name").first).to_have_text("Recepción")
+                expect(page.locator("#online-count")).to_have_text("6 de 6 salas disponibles")
+                output = ROOT / "docs" / "images"
                 output.mkdir(exist_ok=True)
-                page.screenshot(path=str(output / "demo-desktop.png"), full_page=True)
-                page.set_viewport_size({"width": 390, "height": 844})
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-                card(3).locator(".protection-admin summary").click()
+                page.screenshot(path=str(output/"iteration-3-desktop.png"),full_page=True)
+                page.set_viewport_size({"width":390,"height":844})
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-                page.screenshot(path=str(output / "demo-mobile.png"), full_page=True)
-                assert errors == [], errors
+                page.screenshot(path=str(output/"iteration-3-mobile.png"),full_page=True)
+                choose("admin",3)
+                page.locator(".advanced summary").click()
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                page.screenshot(path=str(output/"iteration-3-admin-mobile.png"),full_page=True)
+                choose("lab",3)
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                assert errors == [],errors
                 browser.close()
-                print("PASS browser: six rooms/all controls, FREE/MONITOR/ENFORCE, events/history, error isolation/recovery, restart token, stale5s, XSS, desktop/mobile; 0 JS errors")
+                print("PASS Chromium: six rooms/all controls, separated detail/admin/lab, three policies, administrative confirmations/reasons, events/history, busy/fault isolation, restart/token, stale5s, XSS, keyboard, desktop/mobile; 0 JS errors")
         finally:
             stop()
 
