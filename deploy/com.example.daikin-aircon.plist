@@ -34,11 +34,11 @@
     <key>WorkingDirectory</key>
     <string>/Users/YOURNAME/Daikin-Aircon-controller</string>
 
-    <!-- Start at login and restart automatically if it exits -->
+    <!-- Disabled template: do not install during offline development. -->
     <key>RunAtLoad</key>
-    <true/>
+    <false/>
     <key>KeepAlive</key>
-    <true/>
+    <false/>
 
     <!-- Capture stdout/stderr to a log file -->
     <key>StandardOutPath</key>

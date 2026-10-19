@@ -303,6 +303,9 @@ def main():
     if args.selftest:
         sys.exit(selftest())
 
+    p.error("Hardware BLE disabled in iteration 2. Use: python multiroom_app.py --demo. "
+            "Physical validation requires a separate reviewed authorization/change.")
+
     try:
         sys.exit(asyncio.run(amain(args)))
     except ImportError:

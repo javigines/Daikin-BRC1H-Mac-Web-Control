@@ -4,3 +4,5 @@
 bleak>=0.22            # cross-platform BLE client (uses CoreBluetooth on macOS)
 fastapi>=0.110         # web framework for the control API + page
 uvicorn[standard]>=0.29  # ASGI server that runs the FastAPI app
+
+pydantic>=2.9,<3       # strict multiroom configuration and API models

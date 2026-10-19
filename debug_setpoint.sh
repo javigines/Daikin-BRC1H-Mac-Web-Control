@@ -27,6 +27,9 @@
 #                            read from <repo>/.env)
 #   PYTHON=/path/to/python   interpreter to use (default: python3)
 #   LOG=/path/to/log         log file (default: /tmp/daikin-setpoint-debug.log)
+echo "DISABLED: hardware helpers require separate physical authorization and review." >&2
+exit 2
+
 set -uo pipefail
 
 cd "$(dirname "$0")"

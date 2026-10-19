@@ -706,7 +706,7 @@ async function call(path, body){
     const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
     if(!r.ok){ throw new Error(await r.text()); }
     render(await r.json());
-  }catch(e){ el("status").innerHTML = '<span class="offline">'+e.message+'</span>'; }
+  }catch(e){ el("status").textContent = e.message; }
   finally{ busy = false; }
 }
 
@@ -1011,7 +1011,7 @@ def main():
     p.add_argument("--address", default=os.environ.get("DAIKIN_ADDRESS"),
                    help="BLE address / CoreBluetooth UUID of the controller "
                         "(default: $DAIKIN_ADDRESS, which <repo>/.env can supply)")
-    p.add_argument("--host", default="0.0.0.0", help="bind host (default 0.0.0.0 = all interfaces)")
+    p.add_argument("--host", default="127.0.0.1", help="loopback only in iteration 2")
     p.add_argument("--port", type=int, default=80, help="port (default 80)")
     p.add_argument("--db", default=DEFAULT_DB,
                    help="SQLite history file (default: <repo>/aircon_history.db)")
@@ -1022,6 +1022,9 @@ def main():
 
     if args.selftest:
         raise SystemExit(selftest())
+
+    p.error("Hardware BLE disabled in iteration 2. Use: python multiroom_app.py --demo. "
+            "Physical validation requires a separate reviewed authorization/change.")
 
     if not args.address:
         p.error("no controller address: pass --address, or set DAIKIN_ADDRESS in the "
