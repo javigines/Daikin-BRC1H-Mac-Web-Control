@@ -1,4 +1,4 @@
-"""Deterministic Controller.request/disconnect double, incapable of BLE I/O.
+"""Deterministic prepared-session double, incapable of BLE I/O.
 
 Plans contain data, delays and exceptions only, never callbacks or driver
 factories. Repeated reads use the last planned reply; writes never alter reads
@@ -18,15 +18,28 @@ class Reply:
 
 
 class ScriptedController:
-    def __init__(self, plan: dict[int, list[Reply]]):
+    def __init__(self, plan: dict[int, list[Reply]], *, setup=Reply(), disconnect=Reply()):
         self.plan = {cmd: deque(replies) for cmd, replies in plan.items()}
         self.calls = []
         self.closed = False
+        self.ready = False
+        self.setup_reply, self.disconnect_reply = setup, disconnect
+        self.setup_calls = 0
         self.disconnect_calls = 0
 
-    async def request(self, cmd_id: int, args=None, timeout=6.0):
-        if self.closed:
-            raise ConnectionError("Offline controller closed")
+    async def prepare(self):
+        if self.closed or self.ready:
+            raise ConnectionError("Offline setup cannot restart a session")
+        self.setup_calls += 1
+        await asyncio.sleep(self.setup_reply.delay)
+        if self.setup_reply.error:
+            raise self.setup_reply.error
+        self.ready = True
+
+    async def exchange_ready(self, cmd_id: int, args=None, timeout=6.0):
+        # No setup or reconnect is permitted under an exchange deadline.
+        if self.closed or not self.ready:
+            raise ConnectionError("Offline controller is not ready")
         self.calls.append((cmd_id, copy.deepcopy(args)))
         replies = self.plan.get(cmd_id)
         if not replies:
@@ -39,4 +52,8 @@ class ScriptedController:
 
     async def disconnect(self):
         self.disconnect_calls += 1
+        self.ready = False
+        await asyncio.sleep(self.disconnect_reply.delay)
+        if self.disconnect_reply.error:
+            raise self.disconnect_reply.error
         self.closed = True

@@ -103,6 +103,7 @@ def test_explicit_apply_requires_readback_and_preserves_wire_fields(action,value
         plan[group] = ([Reply(objects=data[group])] if action == "setpoint" else []) + [Reply(objects=changed)]
         controller = ScriptedController(plan)
         backend = DaikinBackend(controller,SessionBudget())
+        await backend.prepare()
         await backend.apply(action,value)
         assert not backend.stopped
         assert any(cmd == command for cmd,args in controller.calls)
@@ -121,6 +122,7 @@ def test_ack_without_matching_observation_stops_and_never_retries():
         controller = port()
         controller.plan[CMD_SET_POWER] = __import__("collections").deque([Reply(objects={})])
         backend = DaikinBackend(controller,SessionBudget())
+        await backend.prepare()
         with pytest.raises(WriteNotConfirmed):
             await backend.apply("power",False)
         before = len(controller.calls)
@@ -138,6 +140,7 @@ def test_six_sessions_concurrency_failure_isolation_and_snapshot_copies():
         ports = [port(delay=.005*i) for i in range(6)]
         ports[2].plan[POWER] = __import__("collections").deque([Reply(error=ConnectionError("injected"))])
         backends = [DaikinBackend(p,budget) for p in ports]
+        await asyncio.gather(*(b.prepare() for b in backends))
         tasks = [asyncio.create_task(b.snapshot(FIELDS)) for b in backends]
         await asyncio.sleep(.001)
         assert budget.operations._value == 0
@@ -157,13 +160,15 @@ def test_active_capacity_duplicate_port_busy_and_close_release():
         budget = SessionBudget()
         first_port = port(delay=.01)
         a,b,c = DaikinBackend(first_port,budget),DaikinBackend(first_port,budget),DaikinBackend(port(),budget)
+        await a.prepare()
         task = asyncio.create_task(a.snapshot(FIELDS))
         await asyncio.sleep(0)
         for backend in (a,b,c):
             with pytest.raises(BackendBusy):
-                await backend.snapshot(FIELDS)
+                await backend.prepare()
         await task
         await a.close()
+        await c.prepare()
         assert (await c.snapshot(("power",)))["power_on"]
         await c.close()
     asyncio.run(case())
@@ -175,6 +180,8 @@ def test_timeout_includes_capacity_wait_and_cancellation_latches_only_owner():
         a = DaikinBackend(port(delay=.05),budget,timeout=2)
         waiting_port = port()
         b = DaikinBackend(waiting_port,budget,timeout=.1)
+        await a.prepare()
+        await b.prepare()
         first = asyncio.create_task(a.snapshot(FIELDS))
         await asyncio.sleep(.005)
         with pytest.raises(TimeoutError):
@@ -189,6 +196,7 @@ def test_timeout_includes_capacity_wait_and_cancellation_latches_only_owner():
             await task
         assert a.stopped and not a.lock.locked()
         c = DaikinBackend(port(),budget)
+        await c.prepare()
         assert (await c.snapshot(("power",)))["power_on"]
         await asyncio.gather(a.close(),b.close(),c.close())
     asyncio.run(case())
@@ -204,6 +212,7 @@ def test_invalid_local_input_does_not_open_session_or_poison_backend():
         with pytest.raises(ValueError):
             await b.snapshot(("unknown",))
         assert not p.calls and not b.claimed and not b.stopped
+        await b.prepare()
         assert (await b.snapshot(("power",)))["power_on"]
         await b.close()
     asyncio.run(case())
@@ -218,6 +227,16 @@ class Guard(importlib.abc.MetaPathFinder):
             raise AssertionError('FORBIDDEN_HARDWARE_IMPORT')
 sys.meta_path.insert(0,Guard())
 from madoka_multiroom.backends.daikin import DaikinBackend, SessionBudget, PhysicalBackendDisabled
+from madoka_multiroom.backends.offline_port import ScriptedController, Reply
+from madoka_protocol import CMD_GET_POWER
+import asyncio
+async def offline_session():
+    p = ScriptedController({CMD_GET_POWER: [Reply(objects={0x20:b'\\x01'})]})
+    b = DaikinBackend(p, SessionBudget())
+    await b.prepare()
+    assert (await b.snapshot(('power',)))['power_on']
+    await b.close()
+asyncio.run(offline_session())
 from madoka_multiroom.api import build_demo_app
 from madoka_multiroom.config import demo_config
 from fastapi.testclient import TestClient
@@ -238,6 +257,7 @@ def test_close_during_setpoint_preread_prevents_all_subsequent_exchanges():
     async def case():
         controller = port(delay=.03)
         backend = DaikinBackend(controller,SessionBudget())
+        await backend.prepare()
         operation = asyncio.create_task(backend.apply("setpoint",24))
         while not controller.calls:
             await asyncio.sleep(0)
@@ -262,6 +282,7 @@ def test_near_miss_setpoint_readback_must_not_be_rounded_to_success():
         plan[SETPOINT] = [Reply(objects=data[SETPOINT]),Reply(objects=after)]
         plan[CMD_SET_SETPOINT] = [Reply(objects={})]
         b = DaikinBackend(ScriptedController(plan),SessionBudget())
+        await b.prepare()
         with pytest.raises(WriteNotConfirmed):
             await b.apply("setpoint",24)
         assert b.stopped and not b.latest
@@ -281,9 +302,10 @@ def test_closing_denied_duplicate_never_disconnects_owner():
         owner = DaikinBackend(controller,budget)
         rejected = DaikinBackend(controller,budget)
         never_admitted = DaikinBackend(controller,budget)
+        await owner.prepare()
         await owner.snapshot(("power",))
         with pytest.raises(BackendBusy):
-            await rejected.snapshot(("power",))
+            await rejected.prepare()
         await rejected.close()
         await never_admitted.close()
         assert controller.disconnect_calls == 0 and not controller.closed
