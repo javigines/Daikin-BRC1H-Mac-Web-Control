@@ -1,8 +1,4 @@
-"""Prepared hardened Controller bridge, executable only with a closed wire model.
-
-The actual Controller.request serialization/framing path is reused. There is no
-Bleak import or production runtime factory; hardware admission remains blocked.
-"""
+"""Ready-only hardened Controller bridge with explicit isolated native admission."""
 import asyncio
 from collections import deque
 from dataclasses import dataclass
@@ -156,9 +152,18 @@ class _CleanupCalls:
 
 class HardenedControllerBridge(Controller):
     """No lazy setup, no second connection, strict callbacks, retained uncertainty."""
-    def __init__(self, identity, radio):
-        if type(radio) is not ScriptedRadio or str(UUID(identity)) != radio.identity:
+    def __init__(self, identity, radio, *, native_authorization=None):
+        self.native = native_authorization is not None
+        if self.native:
+            from .native_radio import NativeRadio
+            from ..native_access import require_authorization
+            grant = require_authorization(native_authorization)
+            if type(radio) is not NativeRadio or radio.grant is not grant:
+                raise BackendUnavailable("Explicit native radio authorization required")
+        elif type(radio) is not ScriptedRadio:
             raise BackendUnavailable("Only the closed offline radio model is allowed")
+        if str(UUID(identity)) != radio.identity:
+            raise BackendUnavailable("Selected radio identity mismatch")
         super().__init__(str(UUID(identity)))
         self.radio = radio
         self.cleanup_report = []
@@ -168,6 +173,11 @@ class HardenedControllerBridge(Controller):
     @classmethod
     def from_physical(cls, *args, **kwargs):
         raise BackendUnavailable("Hardware runtime factory disabled pending physical review")
+
+    @classmethod
+    def from_native_readonly(cls, grant):
+        from .native_radio import NativeRadio
+        return cls(grant.identity, NativeRadio(grant), native_authorization=grant)
 
     @property
     def ready(self):
@@ -180,15 +190,17 @@ class HardenedControllerBridge(Controller):
         self.preparation_attempted = True
         async with self.lock:
             try:
-                async with asyncio.timeout(120):
+                async with asyncio.timeout(150):
                     found = await asyncio.wait_for(self.radio.discover(self.address, 15), 15)
                     if found != self.address:
                         raise BackendUnavailable("Discovery identity mismatch")
                     self.client = self.radio
                     self.radio.disconnected_callback = self._on_disconnect
-                    # The eventual native runtime must pass this to BleakClient too.
-                    await self.radio.connect(timeout=120)
-                    await self.radio.start_notify(NOTIFY_CHAR, self._on_notify)
+                    # Pairing can occur during subscription. This shared setup
+                    # window starts AFTER discovery, outside operation timers.
+                    async with asyncio.timeout(120):
+                        await self.radio.connect(timeout=120)
+                        await self.radio.start_notify(NOTIFY_CHAR, self._on_notify)
                     if not self.radio.is_connected or self.failure or self.closed:
                         raise BackendUnavailable("Setup did not establish readiness")
                     self.connected = True
@@ -228,6 +240,10 @@ class HardenedControllerBridge(Controller):
             self._fail("Malformed or ambiguous response; STOP")
 
     async def exchange_ready(self, cmd_id, args=None, timeout=6):
+        if self.native:
+            from madoka_readonly_canary import GET_COMMANDS
+            if cmd_id not in GET_COMMANDS or args:
+                raise BackendUnavailable("Native bridge permits four GETs only")
         if cmd_id not in GETS + SETS:
             raise ValueError("Command not allowed")
         if cmd_id in GETS and args:

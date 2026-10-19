@@ -1,5 +1,6 @@
 """Loopback DEMO API. The local token is CSRF protection, not user identity."""
 import fcntl
+import base64
 import secrets
 import sqlite3
 import time
@@ -97,8 +98,50 @@ class LocalBoundary:
         await self.app(scope, receive, secured_send)
 
 
+class OperatorBoundary:
+    """Authenticate every native resource; reject all writes except admission.
+
+    Basic authentication is confined to loopback HTTP. LAN access is not offered.
+    CSRF/origin checks are still enforced independently by LocalBoundary.
+    """
+    def __init__(self, app, password):
+        self.app = app
+        self.expected = b"Basic " + base64.b64encode(("operator:" + password).encode())
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            credentials = dict(scope["headers"]).get(b"authorization", b"")
+            if not secrets.compare_digest(credentials, self.expected):
+                return await JSONResponse({"detail": "Operator authentication required"}, 401,
+                    headers={"WWW-Authenticate": 'Basic realm="Madoka read-only", charset="UTF-8"',
+                             "Cache-Control": "no-store"})(scope, receive, send)
+            if scope["method"] not in {"GET", "HEAD"} and not (
+                    scope["method"] == "POST" and scope["path"] == "/api/physical/admit"):
+                return await JSONResponse({"detail": "Native runtime is read-only"}, 403)(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
 def build_demo_app(config: AppConfig, db_path: str = ":memory:", *, offline_fleet=None) -> FastAPI:
+    if offline_fleet is not None:
+        from .backends.physical_fleet import ScriptedPhysicalFleet
+        if type(offline_fleet) is not ScriptedPhysicalFleet:
+            raise ValueError("DEMO accepts only the closed offline fleet")
+    return _build_app(config, db_path, offline_fleet=offline_fleet)
+
+
+def build_native_readonly_app(config, db_path, *, fleet, password):
+    from .backends.native_fleet import NativeReadonlyFleet
+    if type(fleet) is not NativeReadonlyFleet or not isinstance(password, str) or len(password) < 40:
+        raise ValueError("Explicit native fleet and strong ephemeral credentials required")
+    if str(db_path) == ":memory:":
+        raise ValueError("Separate persistent native observation history required")
+    return _build_app(config, db_path, offline_fleet=fleet, native_password=password)
+
+
+def _build_app(config, db_path, *, offline_fleet=None, native_password=None):
     token = secrets.token_urlsafe(32)
+    native = native_password is not None
+    runtime_mode = "native-readonly" if native else "demo"
 
     @asynccontextmanager
     async def lifespan(app):
@@ -112,7 +155,7 @@ def build_demo_app(config: AppConfig, db_path: str = ":memory:", *, offline_flee
                     fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     raise RuntimeError("Database already owned by another application process") from None
-            store = RoomStore(db_path, mode="demo")
+            store = RoomStore(db_path, mode="real" if native else "demo")
             manager = RoomManager(config, store, offline_fleet=offline_fleet)
             app.state.manager = manager
             await manager.start()
@@ -129,6 +172,8 @@ def build_demo_app(config: AppConfig, db_path: str = ":memory:", *, offline_flee
 
     app = FastAPI(title="Madoka · DEMO", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(LocalBoundary, token=token)
+    if native:
+        app.add_middleware(OperatorBoundary, password=native_password)
 
     @app.exception_handler(RequestValidationError)
     async def invalid(request, exc):
@@ -175,12 +220,25 @@ def build_demo_app(config: AppConfig, db_path: str = ":memory:", *, offline_flee
 
     @app.get("/api/session")
     async def session():
-        return {"mode": "demo", "hardware_enabled": False, "token": token}
+        return {"mode": runtime_mode, "hardware_enabled": bool(native and offline_fleet.admitted(offline_fleet.selected_id)), "token": token,
+                **({"selected_id": offline_fleet.selected_id,
+                    "admission_attempted": offline_fleet.attempted} if native else {})}
+
+    @app.post("/api/physical/admit")
+    async def admit(request: Request, body: StrictModel):
+        if not native:
+            raise HTTPException(403, "Native admission unavailable in DEMO")
+        manager = request.app.state.manager
+        try:
+            await manager.prepare_room(offline_fleet.selected_id)
+            return {"status": "ready", "native_release": "unverified"}
+        except Exception:
+            raise HTTPException(503, "Admission stopped; preserve records and obtain supervised review") from None
 
     @app.get("/api/controllers")
     async def controllers(request: Request):
         manager = request.app.state.manager
-        return {"mode": "demo", "controllers": [manager.snapshot(rid) for rid in manager.rooms]}
+        return {"mode": runtime_mode, "controllers": [manager.snapshot(rid) for rid in manager.rooms]}
 
     @app.get("/api/controllers/{controller_id}")
     async def status(request: Request, controller_id: str):

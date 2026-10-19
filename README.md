@@ -1,6 +1,6 @@
-# Daikin BRC1H Mac Web Control · offline multiroom
+# Daikin BRC1H Mac Web Control
 
-**Consolidated Iteration 4A/4B candidate: hardware execution requires separate authorization.** The web application defaults to six simulators. The standalone one-shot canary and offline physical multiroom architecture are included with their separate ownership/quarantine models. No production hardware mode is enabled.
+**Iteration 5 consolidated candidate.** The ordinary application defaults to six simulators and `--real` remains disabled. A separate, explicitly gated macOS read-only entrypoint now implements actual Bleak 3.0.2 transport for one selected controller. No physical execution of this candidate has been authorized or performed. See [native architecture and validation](docs/iteration-5-native-integration.md) and the [blocked operator procedure](docs/native-readonly-web.md).
 
 ## Start the DEMO
 
@@ -32,12 +32,16 @@ Optional real-Chromium integration against temporary HTTP/SQLite resources, with
 .venv-demo/bin/python -m pip install -r requirements-browser.txt
 .venv-demo/bin/python -m playwright install chromium
 .venv-demo/bin/python integration/browser_demo.py
+.venv-demo/bin/python integration/browser_physical_contract.py
+.venv-demo/bin/python integration/browser_native_readonly.py
 ```
 
-Current combined results and limits: [Iteration 3 integration acceptance](docs/iteration-3-integration.md). Historical results: [Iteration 2 validation](docs/iteration-2-validation.md). The original 104 tests remain unchanged. The simplified-interface Chromium harness saves reviewed screenshots under `docs/images/`.
+Current combined results and limits: [Iteration 5 integration acceptance](docs/iteration-5-native-integration.md). Historical results: [Iteration 3 integration acceptance](docs/iteration-3-integration.md) and [Iteration 2 validation](docs/iteration-2-validation.md). The original 104 tests remain unchanged. The simplified-interface Chromium harness saves reviewed screenshots under `docs/images/`.
 
 ## Documentation
 
+- [Native transport, consolidated history, tests and release/rollback](docs/iteration-5-native-integration.md).
+- [One-controller authenticated read-only web procedure — blocked pending fresh owner GO](docs/native-readonly-web.md).
 - [Physical multiroom architecture, durable ownership and hardware gates](docs/physical-multiroom-integration.md).
 - [Iteration 4B validation and independent PR #7 compatibility](docs/iteration-4b-validation.md).
 
@@ -58,7 +62,7 @@ Current combined results and limits: [Iteration 3 integration acceptance](docs/i
 
 ## Compatibility and security
 
-Iteration 4B adds an explicitly injected **offline** six-controller contract fleet using closed wire models and the hardened Controller exchange path. It supports manual command/readback testing and durable session quarantine without importing a BLE driver. There is no production radio factory or physical recovery verifier. The web launcher still selects simulators exclusively; neither API/config changes nor the offline evidence resolver can enable hardware. The standalone canary retains its own permanent attempt record.
+Iteration 4B's explicitly injected **offline** six-controller contract fleet uses closed wire models and the hardened Controller exchange path. It supports manual command/readback testing and durable session quarantine without importing a BLE driver. Iteration 5 adds an isolated native factory, attended macOS preflight, operator authentication and explicit browser admission. Only four reviewed GET groups can reach the native radio. The ordinary launcher selects simulators exclusively. No physical recovery verifier exists. The standalone canary retains its own permanent attempt record, separate from the native web ledger and the offline ledgers.
 
 The standalone `madoka_readonly_canary.py` defaults to OFFLINE; `--selftest` never imports Bleak. Its explicit physical mode is isolated from the web application, requires an exact reviewed clean SHA and private UUID confirmation, and permanently consumes one attempt before discovery. There is no reset/retry path. See the runbook before any separately authorized physical test.
 
@@ -66,13 +70,13 @@ The legacy physical entrypoints `daikin_server.py` and `brc1h_spike.py` allow on
 
 The old `/api/*` API returns 410: migrate to `/api/controllers/{id}/...`, never array positions. New history is separated by identifier, uses a different DB and must not be opened with old code. An explicit import into a new copy of the original history is available; see architecture.
 
-The ephemeral local token protects mutations against CSRF; **it does not authenticate users**. A local process or user can obtain it. Do not publish the port or enable BLE until owner authentication/authorization, operational controls and the documented physical tests are implemented. MONITOR notifications are events and dashboard notices; no external messages are sent.
+The DEMO ephemeral local token protects mutations against CSRF; **it does not authenticate users**. The dedicated native web mode additionally requires a random ephemeral operator password for every page, asset and API request. It binds only to loopback; LAN exposure, physical writes, ENFORCE and native ownership recovery remain blocked. MONITOR notifications are events and dashboard notices; no external messages are sent.
 
 ## Credits
 
 - Upstream: [txsl/cool-vibes](https://github.com/txsl/cool-vibes).
 - BLE protocol reverse-engineering: [Benjamin Lafois — Daikin-Madoka-BRC1H-BLE-Reverse](https://github.com/blafois/Daikin-Madoka-BRC1H-BLE-Reverse).
 - Reference implementation: [pymadoka](https://github.com/mduran80/pymadoka).
-- BLE library retained for legacy tests: [bleak](https://github.com/hbldh/bleak).
+- Native BLE library (reviewed version 3.0.2): [bleak](https://github.com/hbldh/bleak).
 
 The audited upstream declares no explicit license. Attribution is preserved; this fork adds no license and infers no redistribution rights. Clarify rights with the author before redistributing derivatives or making a formal contribution. Historical claims about units in other environments do not certify these six office controllers.

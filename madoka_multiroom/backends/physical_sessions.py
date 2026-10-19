@@ -1,7 +1,7 @@
-"""Durable physical-session lifecycle model, exercised only with closed radios.
+"""Durable ownership with separate closed-model and gated native schemas.
 
-No session is freed by disconnect return, restart, elapsed time or a new budget.
-Offline evidence resolution is deliberately incapable of certifying hardware.
+No native session is freed by disconnect return, restart or elapsed time.
+Offline evidence resolution cannot certify or release native hardware.
 """
 import asyncio
 from dataclasses import dataclass
@@ -60,10 +60,18 @@ class PhysicalSessionBudget:
     models the evidence workflow; no route accepts these attestations as real
     hardware evidence. Storage must be private local trustworthy durable media.
     """
-    def __init__(self, path, plan=ConnectionPlan()):
+    def __init__(self, path, plan=ConnectionPlan(), *, native_authorization=None):
         if type(plan) is not ConnectionPlan or str(path) == ":memory:":
             raise ValueError("Durable ledger and explicit connection plan required")
         self.plan, self.max_active = plan, plan.max_active
+        self.native_authorization = native_authorization
+        self.native = native_authorization is not None
+        if self.native:
+            from ..native_access import require_authorization
+            require_authorization(native_authorization)
+            if plan.max_active != 1 or plan.max_operations != 1:
+                raise ValueError("Native read-only capacity must remain one")
+        schema = "native-readonly-v1" if self.native else "physical-contract-v1"
         self.operations = asyncio.Semaphore(plan.max_operations)
         self._reservations = {}
         self.owner_token = secrets.token_hex(24)
@@ -96,9 +104,9 @@ class PhysicalSessionBudget:
             with self.db:
                 self.db.execute("CREATE TABLE IF NOT EXISTS session_meta (kind TEXT PRIMARY KEY)")
                 rows = self.db.execute("SELECT kind FROM session_meta").fetchall()
-                if rows and [r[0] for r in rows] != ["physical-contract-v1"]:
+                if rows and [r[0] for r in rows] != [schema]:
                     raise ValueError("Unknown session schema")
-                self.db.execute("INSERT OR IGNORE INTO session_meta VALUES ('physical-contract-v1')")
+                self.db.execute("INSERT OR IGNORE INTO session_meta VALUES (?)", (schema,))
                 self.db.execute("CREATE TABLE IF NOT EXISTS bindings (room TEXT PRIMARY KEY, digest TEXT UNIQUE NOT NULL)")
                 self.db.execute("""CREATE TABLE IF NOT EXISTS sessions (
                     session_id TEXT PRIMARY KEY, room TEXT NOT NULL, digest TEXT NOT NULL,
@@ -132,6 +140,13 @@ class PhysicalSessionBudget:
         if type(port) is not HardenedControllerBridge or id(port) in self._reservations:
             raise PhysicalBackendDisabled("Only one closed offline bridge owner is permitted")
         room = owner.room_id
+        if port.native != self.native:
+            raise PhysicalBackendDisabled("Native and offline ledgers cannot share sessions")
+        if self.native:
+            from ..native_access import require_authorization
+            grant = require_authorization(self.native_authorization)
+            if port.radio.grant is not grant or port.address != grant.identity or room != grant.room_id:
+                raise PhysicalBackendDisabled("Native authorization binding mismatch")
         digest = hashlib.sha256(port.address.encode()).hexdigest()
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -148,12 +163,16 @@ class PhysicalSessionBudget:
                 raise BackendBusy("Durable session capacity reached; no automatic rotation")
             sid = secrets.token_hex(24)
             self.db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,1)", (sid, room, digest, self.owner_token, "reserved"))
-            self._event(sid, "reserved_before_prepare", {"strategy": self.plan.strategy})
+            self._event(sid, "reserved_before_prepare", {"strategy": self.plan.strategy,
+                **({"reviewed_sha": grant.reviewed_sha, "authorization_reference": grant.reference}
+                   if self.native else {})})
             self.db.commit()
         except BaseException:
             self.db.rollback()
             raise
         self._reservations[id(port)] = (port, owner, sid)
+        if self.native:
+            port.radio.reserved = True
 
     def _owned(self, port, owner):
         entry = self._reservations.get(id(port))
@@ -183,6 +202,8 @@ class PhysicalSessionBudget:
         raise CleanupUncertain("Public disconnect does not prove native release; review required")
 
     def resolve_offline(self, evidence):
+        if self.native:
+            raise PhysicalBackendDisabled("Offline evidence cannot release native ownership")
         if type(evidence) is not OfflineRecoveryEvidence:
             raise ValueError("Typed offline evidence required")
         evidence.validate()

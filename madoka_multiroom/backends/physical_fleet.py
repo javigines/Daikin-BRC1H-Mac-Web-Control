@@ -27,7 +27,7 @@ class PreparedDaikinBackend(DaikinBackend):
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", room_id) or type(capabilities) is not DeviceCapabilities:
             raise ValueError("Stable room identity and capabilities required")
         self.room_id, self.capabilities = room_id, capabilities
-        kwargs.setdefault("setup_timeout", 140)
+        kwargs.setdefault("setup_timeout", 170)
         super().__init__(controller, budget, **kwargs)
         self.info.update(backend="hardened-controller-contract-offline", hardware_enabled=False,
                          supported_fields=list(capabilities.fields), native_state="unverified")

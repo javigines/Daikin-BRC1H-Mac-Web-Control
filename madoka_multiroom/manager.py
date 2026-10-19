@@ -1,6 +1,6 @@
 """Independent simulated rooms, bounded coordination and staggered polling.
 
-The optional physical contract fleet accepts closed wire models only.
+The optional fleet accepts closed wire models or explicit native read-only admission.
 The backend boundary is an async snapshot/apply/close interface, not BLE itself.
 """
 import asyncio
@@ -42,9 +42,12 @@ class Room:
 class RoomManager:
     def __init__(self, config: AppConfig, store: RoomStore, *, offline_fleet=None):
         self.offline_fleet = offline_fleet
+        self.native_readonly = False
         if offline_fleet is not None:
             from .backends.physical_fleet import ScriptedPhysicalFleet
-            if type(offline_fleet) is not ScriptedPhysicalFleet:
+            from .backends.native_fleet import NativeReadonlyFleet
+            self.native_readonly = type(offline_fleet) is NativeReadonlyFleet
+            if type(offline_fleet) not in (ScriptedPhysicalFleet, NativeReadonlyFleet):
                 raise ValueError("Only the closed offline physical fleet is accepted")
             offline_fleet.validate_config(config)
         self.config = config
@@ -75,12 +78,12 @@ class RoomManager:
                 "stale_after_seconds": self.config.stale_seconds,
                 "error": room.failure or ("Prepared link unavailable; review required" if link_unavailable else None), "state": copy.deepcopy(room.latest),
                 "info": dict(room.backend.info), "stats": dict(room.stats),
-                "controls_enabled": enabled and not stale and not room.lock.locked(),
-                "queries": room.config.queries.model_dump(), "simulated": True,
-                "transport": "offline-controller-contract" if self.offline_fleet else "simulator",
+                "controls_enabled": not self.native_readonly and enabled and not stale and not room.lock.locked(),
+                "queries": room.config.queries.model_dump(), "simulated": not self.native_readonly,
+                "transport": "native-readonly" if self.native_readonly else "offline-controller-contract" if self.offline_fleet else "simulator",
                 "session_state": room.backend.state.value if self.offline_fleet else "simulated",
                 "physical_enforce_enabled": False,
-                "hardware_enabled": False,
+                "hardware_enabled": self.native_readonly and self.offline_fleet.admitted(room_id),
                 "protection": room.policy.view()}
 
     def stop_policy(self, room, reason):
@@ -91,6 +94,8 @@ class RoomManager:
             # stop() keeps the in-memory latch even if SQLite is unavailable.
 
     async def operate(self, room_id: str, action: str | None = None, value=None):
+        if self.native_readonly and action is not None:
+            raise RoomUnavailable("Native runtime is read-only")
         room = self.room(room_id)
         if self.closing or not room.config.enabled or room.failure:
             raise RoomUnavailable("Controller disabled, stopped or failed")
@@ -113,7 +118,7 @@ class RoomManager:
             try:
                 if action:
                     room.policy.desired({FIELDS[action]: value})
-                async with asyncio.timeout(room.config.queries.timeout_seconds):
+                async with asyncio.timeout(30 if self.native_readonly else room.config.queries.timeout_seconds):
                     async with self.capacity:
                         if self.closing:
                             raise RoomUnavailable("Application closing")
@@ -163,6 +168,8 @@ class RoomManager:
         room = self.room(room_id)
         if not room.config.enabled or room.failure or room.lock.locked():
             raise RoomBusy("Room unavailable for admission")
+        if self.native_readonly:
+            self.offline_fleet.consume_admission(room_id)
         async with room.lock:
             task = asyncio.current_task()
             self.operations.add(task)
@@ -204,6 +211,8 @@ class RoomManager:
         return self.snapshot(room_id)
 
     async def administer(self, room_id: str, change, body):
+        if self.native_readonly:
+            raise RoomUnavailable("Native administration and desired-state changes are disabled")
         room = self.room(room_id)
         if self.closing or not room.config.enabled:
             raise RoomUnavailable("Controller disabled or closed")

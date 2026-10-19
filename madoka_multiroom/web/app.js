@@ -3,13 +3,14 @@ const cards = new Map();
 const rooms = document.querySelector("#rooms");
 const message = document.querySelector("#app-message");
 let token = "", polling = false, failed = false;
+let nativeReadonly = false, nativeAttempted = false, nativeRoomName = "";
 let admin = null, lab = null, detail = null, pendingConfirmation = null;
 const stamp = seconds => seconds ? new Date(seconds * 1000).toLocaleString("es-ES") : "Sin lecturas";
 const names = {setpoint:"Temperatura",mode_id:"Modo",fan_id:"Ventilador",power_on:"Encendido"};
 const policyNames = {FREE:"Libre",MONITOR:"Supervisar cambios",ENFORCE:"Proteger configuración"};
 
-async function api(path, body) {
-  const options = {signal:AbortSignal.timeout(10000),cache:"no-store"};
+async function api(path, body, timeout = 10000) {
+  const options = {signal:AbortSignal.timeout(timeout),cache:"no-store"};
   if (body !== undefined) Object.assign(options, {method:"POST",headers:{"Content-Type":"application/json","X-Demo-Token":token},body:JSON.stringify(body)});
   const response = await fetch(path, options);
   const payload = await response.json();
@@ -39,7 +40,7 @@ function updateControls(root, card) {
     if (input) input.disabled = disabled;
   }
   const power = root.querySelector(".power");
-  power.textContent = state.power_on ? "Encendido · apagar" : "Apagado · encender";
+  power.textContent = nativeReadonly ? state.power_on == null ? "Encendido sin lectura" : state.power_on ? "Encendido · solo lectura" : "Apagado · solo lectura" : state.power_on ? "Encendido · apagar" : "Apagado · encender";
   power.setAttribute("aria-pressed", String(Boolean(state.power_on)));
   power.disabled ||= state.power_on == null;
   root.querySelector(".decrease").disabled ||= state.setpoint == null || state.setpoint <= state.min_setpoint;
@@ -235,7 +236,7 @@ async function history(card) {
   const dialog = document.querySelector("#history-dialog");
   document.querySelector("#history-title").textContent = `Historial · ${card.data.name}`;
   document.querySelector("#history-rows").replaceChildren();
-  document.querySelector("#history-message").textContent = "Cargando muestras simuladas…";
+  document.querySelector("#history-message").textContent = nativeReadonly ? "Cargando lecturas físicas…" : "Cargando muestras simuladas…";
   if (!dialog.open) dialog.showModal();
   try {
     const data = await api(`/api/controllers/${encodeURIComponent(card.data.id)}/history?limit=100`);
@@ -263,8 +264,23 @@ async function poll() {
   polling = true;
   const epochs = new Map([...cards].map(([id,card]) => [id,card.epoch]));
   try {
-    token = (await api("/api/session")).token;
+    const session = await api("/api/session");
+    token = session.token;
+    nativeReadonly = session.mode === "native-readonly";
+    if (nativeReadonly) {
+      document.querySelector(".demo-label").textContent = "Bluetooth · solo lectura supervisada";
+      document.querySelector("#native-admission").hidden = false;
+      for (const view of ["admin","lab"]) document.querySelector(`[data-view="${view}"]`).hidden = true;
+      if (session.admission_attempted && !nativeAttempted) document.querySelector("#native-status").textContent = "Intento consumido. Revisión supervisada necesaria.";
+      nativeAttempted ||= session.admission_attempted;
+      document.querySelector("#native-connect").disabled = nativeAttempted || !nativeRoomName;
+    }
     const data = await api("/api/controllers"); failed = false;
+    if (nativeReadonly) {
+      nativeRoomName = data.controllers.find(room => room.id === session.selected_id)?.name || "";
+      document.querySelector("#native-selected").textContent = nativeRoomName ? `Sala autorizada: ${nativeRoomName}` : "Sala autorizada no disponible.";
+      document.querySelector("#native-connect").disabled = nativeAttempted || !nativeRoomName;
+    }
     for (const room of data.controllers) {
       const card = cards.get(room.id);
       if (!card) createCard(room);
@@ -284,4 +300,18 @@ setInterval(() => {
   for (const card of cards.values()) if (card.data.updated_at && Date.now()/1000-card.data.updated_at > card.data.stale_after_seconds) render(card,{...card.data,stale:true});
   updateOverview();
 },1000);
+document.querySelector("#native-connect").addEventListener("click", async () => {
+  if (!nativeReadonly || !nativeRoomName || nativeAttempted || !window.confirm(`${nativeRoomName}: ¿confirmas la autorización vigente para una conexión de solo lectura? No se podrá repetir.`)) return;
+  nativeAttempted = true;
+  document.querySelector("#native-connect").disabled = true;
+  const status = document.querySelector("#native-status");
+  status.textContent = "Conectando y suscribiendo… Atiende el diálogo de macOS. No repitas la operación.";
+  try {
+    await api("/api/physical/admit", {}, 180000);
+    status.textContent = "Sesión preparada. Solo lecturas. Al detener, conserva los registros para revisión.";
+  } catch (_) {
+    status.textContent = "STOP: conexión no confirmada. Conserva los registros y solicita revisión. No repitas.";
+  }
+  poll();
+});
 poll(); setInterval(poll,2000);
