@@ -220,7 +220,7 @@ def test_local_uncertain_write_reconnects_for_reads_but_never_replays(local,faul
         if fault in ('timeout','cancel','disconnect'):
             local.stage='write';local.room='room-1'
             local.delay=1 if fault=='timeout' else 0
-            backend.timeout=.1 if fault=='timeout' else 30
+            backend.manual_timeout=.1 if fault=='timeout' else 90
             local.error=asyncio.CancelledError() if fault=='cancel' else ConnectionError('closed disconnect') if fault=='disconnect' else None
         if fault=='readback': local.fail_readback=True
         operation_id=str(uuid4())
@@ -256,6 +256,7 @@ def test_local_pending_operation_and_history_survive_normal_restart(local,tmp_pa
         state=await backend.snapshot(('power','mode','setpoint','sensor','fan'))
         assert state['setpoint']==22 and not backend.control_view()['setpoint']
         assert local.budget.last_operation('room-1')['operation_id']==original_id
+        assert local.budget.last_operation('room-1')['diagnostics'][-1]['stage']=='failed'
         assert len(sets(local))==1
         await backend.close()
     asyncio.run(case())
@@ -380,7 +381,7 @@ def test_local_write_queue_expires_before_starting_a_late_set(local,monkeypatch)
         await manager.operate('room-1')
         for _ in range(local.budget.plan.max_operations): await manager.capacity.acquire()
         real_timeout=asyncio.timeout
-        monkeypatch.setattr(asyncio,'timeout',lambda seconds:real_timeout(.02 if seconds==35 else seconds))
+        monkeypatch.setattr(asyncio,'timeout',lambda seconds:real_timeout(.02 if seconds==30 else seconds))
         with pytest.raises(RoomBusy):
             await manager.native_manual('room-1','power',False,str(uuid4()),'Local browser action')
         assert not sets(local) and not local.budget.pending_operation('room-1') and not backend.stopped

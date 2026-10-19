@@ -55,7 +55,7 @@ Optional real-Chromium integration against temporary HTTP/SQLite resources, with
 .venv-demo/bin/python integration/browser_local.py
 ```
 
-Current combined results and limits: [local validation](docs/local-validation.md). Historical results: [office validation](docs/office-validation.md), [Iteration 5 integration acceptance](docs/iteration-5-native-integration.md), [Iteration 3 integration acceptance](docs/iteration-3-integration.md) and [Iteration 2 validation](docs/iteration-2-validation.md). The original 104 tests remain unchanged. The simplified-interface Chromium harness saves reviewed screenshots under `docs/images/`.
+Current correction and limits: [power incident RCA](docs/local-power-incident.md). Original local candidate: [local validation](docs/local-validation.md). Historical results: [office validation](docs/office-validation.md), [Iteration 5 integration acceptance](docs/iteration-5-native-integration.md), [Iteration 3 integration acceptance](docs/iteration-3-integration.md) and [Iteration 2 validation](docs/iteration-2-validation.md). The original 104 tests remain unchanged. The simplified-interface Chromium harness saves reviewed screenshots under `docs/images/`.
 
 ## Documentation
 

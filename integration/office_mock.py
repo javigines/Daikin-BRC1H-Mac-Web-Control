@@ -39,6 +39,10 @@ def closed_office(directory, *, concurrency=2, port=8443, local=False):
     options.failed_effect_rooms = set()
     options.external_connections = set()
     options.native_overrides = {}
+    options.reply_hook = None
+    options.exchange_delay = 0
+    options.mute_reply_for = set()
+    options.disconnect_after_set = False
     for d in config.rooms.devices:
         block = {0x20: temp_to_bytes(22), 0x21: temp_to_bytes(21),
                  **{k: value.to_bytes(size, "big") for k, size, value in SETPOINT_EXTRA_FIELDS}}
@@ -120,6 +124,7 @@ def closed_office(directory, *, concurrency=2, port=8443, local=False):
                 return
             command, args = cmd_id_of(payload), parse_objects(payload)
             options.calls.append((self.room, command, args))
+            await asyncio.sleep(options.exchange_delay)
             is_set = command in (CMD_SET_POWER, CMD_SET_MODE, CMD_SET_SETPOINT, CMD_SET_FAN)
             if is_set:
                 self.wrote = True
@@ -132,8 +137,15 @@ def closed_office(directory, *, concurrency=2, port=8443, local=False):
                              CMD_SET_SETPOINT: CMD_GET_SETPOINT, CMD_SET_FAN: CMD_GET_FAN}[command]
                     options.states[self.room][group].update(args)
                 objects = options.ack
+                if options.disconnect_after_set:
+                    self.is_connected = False
+                    self.callback(self)
             else:
                 objects = options.states[self.room][command]
+            if options.reply_hook:
+                objects = options.reply_hook(self.room, command, dict(objects), self.wrote)
+            if command in options.mute_reply_for:
+                return
             body = b"".join(bytes((k, len(v))) + v for k, v in objects.items())
             answer = bytes((4 + len(body), 0)) + command.to_bytes(2, "big") + body
             for chunk in split_in_chunks(bytearray(answer)):

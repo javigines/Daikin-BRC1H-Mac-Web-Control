@@ -33,6 +33,9 @@ def serve(directory):
     from madoka_multiroom.api import build_local_app
     from madoka_multiroom.office_access import Controls
     with closed_office(directory, local=True) as local:
+        from madoka_protocol import CMD_SET_POWER, CMD_GET_POWER
+        local.states['room-6'][CMD_GET_POWER][0x20] = b'\x00'
+        local.reply_hook = lambda room, command, objects, wrote: {0x20: b'\x00'} if command == CMD_SET_POWER else objects
         if not local.fleet.settings_path.exists():
             for backend in local.fleet.backends.values(): backend.controls=Controls()
         local.failed_effect_rooms.add("room-3")
@@ -110,6 +113,18 @@ def main():
                 expect(card(2).locator(".operation-status")).to_have_text("Cambio confirmado")
                 card(2).locator(".power").click()
                 expect(card(2).locator(".power")).to_have_attribute("aria-pressed","false")
+                expect(page.locator("#online-count")).to_have_text("6 de 6 salas disponibles")
+                # An HTTP rejection is not evidence of a radio disconnect.
+                manual_route = '**/api/controllers/room-6/manual'
+                page.route(manual_route, lambda route: route.fulfill(status=409, content_type='application/json', body='{"detail":"Daikin ocupado"}'))
+                card(6).locator('.power').click()
+                expect(card(6).locator('.operation-status')).to_have_text('Daikin ocupado')
+                expect(card(6).locator('.connection')).to_have_text('Conectado')
+                expect(page.locator('#online-count')).to_have_text('6 de 6 salas disponibles')
+                page.unroute(manual_route)
+                card(6).locator('.power').click()
+                expect(card(6).locator('.power')).to_have_attribute('aria-pressed', 'true')
+                expect(card(6).locator('.operation-status')).to_have_text('Cambio confirmado')
                 card(4).locator(".increase").click()
                 expect(card(4)).to_have_attribute("aria-busy","true")
                 expect(card(5).locator(".power")).to_be_enabled()
@@ -117,6 +132,8 @@ def main():
                 card(3).locator(".increase").click()
                 expect(card(3).locator(".operation-status")).to_contain_text("No se pudo confirmar")
                 expect(card(3).locator(".increase")).to_be_disabled()
+                expect(card(3).locator('.connection')).to_have_text('Conectado')
+                expect(page.locator('#online-count')).to_have_text('6 de 6 salas disponibles')
                 expect(card(6).locator(".increase")).to_be_enabled()
                 card(3).locator(".native-recover").click()
                 expect(card(3).locator(".operation-status")).to_contain_text("cambio anterior no se confirmó",timeout=12000)
@@ -124,6 +141,14 @@ def main():
                 card(1).locator(".details").click();page.locator("#detail-content .history").click()
                 expect(page.locator("#history-rows tr").first).to_be_visible()
                 page.locator("#close-history").click();page.locator("#close-detail").click()
+                card(6).locator('.details').click()
+                page.locator('.local-diagnostics summary').click()
+                expect(page.locator('.local-diagnostics pre')).to_contain_text('ack_validate')
+                expect(page.locator('.local-diagnostics pre')).to_contain_text('confirmed')
+                page.set_viewport_size({'width':390,'height':844})
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                page.locator('#close-detail').click()
+                page.set_viewport_size({'width':1440,'height':1100})
                 output=ROOT/"artifacts";output.mkdir(exist_ok=True)
                 page.screenshot(path=str(output/"local-desktop.png"),full_page=True)
                 page.set_viewport_size({"width":390,"height":844})

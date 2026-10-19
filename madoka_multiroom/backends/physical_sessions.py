@@ -130,6 +130,9 @@ class PhysicalSessionBudget:
                     operation_id TEXT PRIMARY KEY, room TEXT NOT NULL, action TEXT NOT NULL,
                     value TEXT NOT NULL, before_state TEXT NOT NULL, status TEXT NOT NULL,
                     observed TEXT, at REAL NOT NULL)""")
+                self.db.execute("""CREATE TABLE IF NOT EXISTS native_operation_events (
+                    event_id INTEGER PRIMARY KEY, operation_id TEXT NOT NULL,
+                    at REAL NOT NULL, stage TEXT NOT NULL, details TEXT NOT NULL)""")
                 for row in self.db.execute("SELECT * FROM sessions WHERE state NOT IN ('released_offline','released_native')").fetchall():
                     self.db.execute("UPDATE sessions SET state='quarantined',revision=revision+1 WHERE session_id=?", (row["session_id"],))
                     self._event(row["session_id"], "restart_quarantine", {})
@@ -201,7 +204,7 @@ class PhysicalSessionBudget:
             raise PhysicalBackendDisabled("Durable owner mismatch")
         return row
 
-    def transition(self, port, owner, state):
+    def transition(self, port, owner, state, *, details=None):
         row = self._owned(port, owner)
         if state not in ("ready", "quarantined") or (state == "ready" and row["state"] != "reserved"):
             raise CleanupUncertain("Invalid session transition")
@@ -210,10 +213,14 @@ class PhysicalSessionBudget:
                 (state, row["session_id"], self.owner_token, row["revision"]))
             if changed.rowcount != 1:
                 raise CleanupUncertain("Session revision mismatch")
-            self._event(row["session_id"], state, {"native_state": "unverified"})
+            self._event(row["session_id"], state, {"native_state": "unverified", **(details or {})})
 
     def quarantine(self, port, owner):
-        self.transition(port, owner, "quarantined")
+        self.transition(port, owner, "quarantined", details={
+            'cause': getattr(owner, 'lifecycle_context', 'operation_failure'),
+            'cleanup_error_class': getattr(owner, 'cleanup_error', None),
+            'exchange': getattr(port, 'last_exchange', None),
+            'cleanup_calls': port.cleanup_report})
 
     def release(self, port, owner):
         if self.office and getattr(port.radio, "release_evidence", None) and not port.cleanup_failed:
@@ -221,7 +228,8 @@ class PhysicalSessionBudget:
             with self.db:
                 self.db.execute("UPDATE sessions SET state='released_native',revision=revision+1 WHERE session_id=?",
                                 (row["session_id"],))
-                self._event(row["session_id"], "native_application_ownership_released", port.radio.release_evidence)
+                self._event(row["session_id"], "native_application_ownership_released", {
+                    **port.radio.release_evidence, 'cause': getattr(owner, 'lifecycle_context', 'explicit_close')})
             del self._reservations[id(port)]
             port.radio.reserved = False
             return
@@ -237,7 +245,17 @@ class PhysicalSessionBudget:
         if row is None:
             return None
         return {**dict(row), "before_state": json.loads(row["before_state"]),
+                "diagnostics": self.operation_events(row['operation_id']),
                 "value": json.loads(row["value"]), "observed": json.loads(row["observed"]) if row["observed"] else None}
+
+    def operation_event(self, operation_id, stage, details):
+        with self.db:
+            self.db.execute('INSERT INTO native_operation_events(operation_id,at,stage,details) VALUES (?,?,?,?)',
+                (operation_id, time.time(), stage, json.dumps(details)))
+
+    def operation_events(self, operation_id):
+        return [{**dict(row), 'details': json.loads(row['details'])} for row in self.db.execute(
+            'SELECT at,stage,details FROM native_operation_events WHERE operation_id=? ORDER BY event_id', (operation_id,))]
 
     def recent_admissions(self, room, seconds=600):
         return self.db.execute("SELECT COUNT(*) FROM session_events e JOIN sessions s USING(session_id) WHERE s.room=? AND e.kind='reserved_before_prepare' AND e.at>?",

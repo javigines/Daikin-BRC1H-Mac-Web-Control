@@ -3,6 +3,7 @@
 Writes are explicit, journaled before transmission and never replayed. A normal
 verified close can release APP ownership. Unproven cleanup remains quarantined.
 """
+import asyncio
 import copy
 import math
 import time
@@ -20,6 +21,22 @@ from .controller_bridge import HardenedControllerBridge
 from .physical_fleet import PreparedDaikinBackend
 from .physical_sessions import PhysicalSessionBudget
 from .daikin import SessionState, WriteNotConfirmed
+
+
+def validate_set_ack(command, objects):
+    """A correlated SET response permits GET verification, never proves effect.
+
+    pymadoka documents status-shaped SET replies whose value need not equal the
+    requested state. Accept only the known power/mode shapes, plus the legacy
+    empty response. Unknown schemas remain uncertain; never guess an error code.
+    """
+    if objects in ({}, {0: b""}):
+        return
+    values = range(2) if command == CMD_SET_POWER else range(6) if command == CMD_SET_MODE else ()
+    if (set(objects) == {0x20} and type(objects[0x20]) is bytes
+            and len(objects[0x20]) == 1 and objects[0x20][0] in values):
+        return
+    raise WriteNotConfirmed("Unrecognized SET acknowledgement schema")
 
 
 def setpoint_block(objects, mode, value, controls):
@@ -49,6 +66,9 @@ class OfficeBackend(PreparedDaikinBackend):
     def __init__(self, room, port, budget, controls):
         self.controls = controls
         self.raw = {}
+        self.manual_context = None
+        self.last_manual_diagnostic = None
+        self.manual_timeout = 90
         super().__init__(room.id, port, budget, timeout=30, setup_timeout=170)
         self.info.update(backend="native-office", hardware_enabled=True,
                          supported_fields=["power", "mode", "setpoint", "sensor", "fan"])
@@ -56,16 +76,41 @@ class OfficeBackend(PreparedDaikinBackend):
     async def _request(self, cmd, args=None):
         if self.closed or self.stopped or self.state is not SessionState.READY:
             raise BackendUnavailable("Native session stopped")
+        if self.manual_context:
+            self._trace(self.manual_context['phase'], command=f"0x{cmd:04x}")
         result = await self.port.exchange_ready(cmd, args, timeout=6)
         if not self.port.ready:
             raise BackendUnavailable("Link lost during native operation")
         return result
 
-    async def _read(self, fields):
+    def _trace(self, stage, **details):
+        context = self.manual_context
+        if context:
+            context['stage'] = stage
+            self.last_manual_diagnostic = {"operation_id": context['id'], "stage": stage,
+                "elapsed_ms": round((time.monotonic() - context['start']) * 1000), **details}
+            self.budget.operation_event(context['id'], stage, self.last_manual_diagnostic)
+
+    async def _execute(self, operation, *, timeout=None):
+        # A well-framed reply with an unconfirmed effect does not establish
+        # link loss. Keep GETs alive; the durable unresolved operation blocks SET.
+        async def local_operation():
+            try:
+                return await operation()
+            except WriteNotConfirmed as exc:
+                if not getattr(self.budget, 'local', False) or not self.port.ready:
+                    raise
+                return exc
+        result = await super()._execute(local_operation, timeout=timeout)
+        if isinstance(result, WriteNotConfirmed):
+            raise result
+        return result
+
+    async def _read(self, fields, *, initial=None):
         state, raw = {}, {}
         commands = (CMD_GET_POWER, CMD_GET_MODE, CMD_GET_SETPOINT, CMD_GET_SENSOR)
         for command in commands:
-            raw[command] = await self._request(command)
+            raw[command] = initial[command] if initial and command in initial else await self._request(command)
             group = observation(command, raw[command])
             if any(v["status"] != "available" for v in group.values()):
                 raise BackendUnavailable("Required native observation unavailable")
@@ -147,6 +192,7 @@ class OfficeBackend(PreparedDaikinBackend):
             raise BackendUnavailable("Duplicate or unresolved write; STOP, no replay")
         async def operation():
             journaled = False
+            self.manual_context = {'id': operation_id, 'start': time.monotonic(), 'stage': 'baseline', 'phase': 'baseline_get'}
             try:
                 before = await self._read(())
                 raw = copy.deepcopy(self.raw)
@@ -163,6 +209,7 @@ class OfficeBackend(PreparedDaikinBackend):
                              "wire": {str(c): {str(k): v.hex() for k, v in obj.items()} for c, obj in raw.items()}})
                         journaled = True
                         authorize_desired(field, value)
+                        self._trace('confirmed_noop')
                         self.budget.finish_operation(operation_id, "confirmed", before)
                         return before
                 if action == "setpoint":
@@ -181,16 +228,37 @@ class OfficeBackend(PreparedDaikinBackend):
                 if before[field] == value:
                     raise ValueError("Requested value already observed; no SET necessary")
                 saved = {"state": before, "wire": {str(cmd): {str(k): v.hex() for k, v in objects.items()} for cmd, objects in raw.items()}, "reason": reason}
+                self._trace('persist_baseline')
                 self.budget.begin_operation(self.port, self, operation_id, action, value, saved)
                 journaled = True
                 # An authorized API operation is the only native desired-state
                 # source. Both durable stores must succeed before any SET byte.
+                self._trace('persist_desired')
                 authorize_desired(field, value)
                 self.port.radio.arm_write(command, args)
+                self.manual_context['phase'] = 'set_exchange'
                 ack = await self._request(command, args)
-                if ack not in ({}, {0: b""}):
-                    raise WriteNotConfirmed("Unrecognized SET acknowledgement; STOP")
-                observed = await self._read(())
+                self._trace('ack_validate', objects={str(k): v.hex() for k, v in ack.items()})
+                validate_set_ack(command, ack)
+                self.manual_context['phase'] = 'readback_get'
+                initial = None
+                if action == 'power' and getattr(self.budget, 'local', False):
+                    # Only successful, correlated GETs with an old value can
+                    # settle. A timeout/malformed reply stops immediately.
+                    for attempt, delay in enumerate((0, .3, .6), 1):
+                        await asyncio.sleep(delay)
+                        reply = await self._request(CMD_GET_POWER)
+                        group = observation(CMD_GET_POWER, reply)['power_on']
+                        self._trace('power_readback', attempt=attempt, status=group['status'], value=group.get('value'))
+                        if group['status'] != 'available':
+                            raise BackendUnavailable('Power readback schema unavailable')
+                        if group['value'] == value:
+                            initial = {CMD_GET_POWER: reply}
+                            break
+                    if initial is None:
+                        raise WriteNotConfirmed('Power did not settle within three GET observations')
+                observed = await self._read((), initial=initial)
+                self._trace('readback_validate')
                 expected = dict(before)
                 expected[field] = value
                 if action == "setpoint":
@@ -204,18 +272,34 @@ class OfficeBackend(PreparedDaikinBackend):
                 # Room temperature can move naturally. Mode/power and both
                 # inactive targets/fans must remain unchanged unless requested.
                 keys = ("power_on", "mode_id", "cooling_setpoint", "heating_setpoint", "cooling_fan_id", "heating_fan_id")
-                if observed.get(field) != value or any(k in expected and observed.get(k) != expected[k] for k in keys):
+                mismatches = {k: {'expected': expected.get(k), 'observed': observed.get(k)}
+                    for k in set(keys) | {field} if k in expected and observed.get(k) != expected[k]}
+                if mismatches:
+                    self._trace('readback_validate', mismatches=mismatches)
                     raise WriteNotConfirmed("GET readback did not confirm exactly the intended change")
+                self._trace('confirmed')
                 self.budget.finish_operation(operation_id, "confirmed", observed)
                 self.latest = copy.deepcopy(observed)
                 return observed
-            except BaseException:
+            except BaseException as exc:
                 if journaled:
                     self.budget.finish_operation(operation_id, "uncertain")
+                try:
+                    self._trace('failed', failed_stage=self.manual_context['stage'], error_class=type(exc).__name__,
+                        journaled=journaled, transport_ready=self.port.ready,
+                        exchange=getattr(self.port, 'last_exchange', None))
+                except Exception:
+                    # A storage error must not replace the originating failure.
+                    # The in-memory diagnostic remains available in room detail.
+                    pass
                 raise
             finally:
                 self.port.radio.write_frames.clear()
-        result = await self._execute(operation)
+                self.manual_context = None
+        # Eleven ordinary exchanges can each take six seconds. The old shared
+        # thirty-second clock could cancel a SET/readback after a slow baseline.
+        result = await self._execute(operation,
+            timeout=self.manual_timeout if getattr(self.budget, 'local', False) else None)
         if result.get("_local_rejected"):
             raise ValueError("El estado del Daikin ha cambiado; consulta la lectura antes de ajustar este control")
         return result
