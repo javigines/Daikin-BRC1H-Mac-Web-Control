@@ -1,6 +1,8 @@
-# Proposed first Madoka read-only canary — BLOCKED
+# Historical Iteration 3 proposal: first Madoka read-only canary — BLOCKED
 
-**Status: proposal only. Physical authorization has NOT been granted. Do not execute this procedure, remove guards or run historical scan/spike commands.** The integrated candidate cannot activate physical hardware. No runnable physical command or enabling patch is provided here. Offline acceptance does not change this status.
+**Iteration 4A update:** the [standalone diagnostic and attended runbook](mac-b-readonly-canary.md) now provide the reviewed preparation described below; see [offline validation and remaining risks](iteration-4a-validation.md). Physical execution is still NOT authorized. The paragraphs below preserve the proposal and implementation gaps at the Iteration 3 integration commit; statements about no runnable command/bridge refer to that historical RC, not the new standalone CLI. The new CLI retains every attempt permanently and provides no automatic native recovery/release.
+
+**Historical Iteration 3 status: proposal only. Physical authorization has NOT been granted. Do not execute this procedure, remove guards or run historical scan/spike commands.** The integrated candidate cannot activate physical hardware. No runnable physical command or enabling patch is provided here. Offline acceptance does not change this status.
 
 ## Required authorization and implementation gates
 

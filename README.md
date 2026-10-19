@@ -1,6 +1,6 @@
 # Daikin BRC1H Mac Web Control · offline multiroom
 
-**Iteration 4B architecture candidate: offline validation only / HOLD real Bluetooth.** This branch runs simulators only: six independent rooms, a dashboard, history and protection policies. It does not scan, connect, pair or write over Bluetooth. It is not enabled for production.
+**Consolidated Iteration 4A/4B candidate: hardware execution requires separate authorization.** The web application defaults to six simulators. The standalone one-shot canary and offline physical multiroom architecture are included with their separate ownership/quarantine models. No production hardware mode is enabled.
 
 ## Start the DEMO
 
@@ -44,7 +44,9 @@ Current combined results and limits: [Iteration 3 integration acceptance](docs/i
 - [Integrated candidate and lifecycle investigations](docs/iteration-3-integration.md).
 - [Simplified interface](docs/iteration-3-ux.md) and [offline adapter](docs/iteration-3-ble-adapter.md).
 - [Mac B offline acceptance](docs/mac-b-offline-iteration-3.md).
-- [Proposed read-only canary — blocked until separate authorization](docs/first-madoka-read-only-canary.md).
+- [One-shot read-only canary runbook — physical execution blocked until separate authorization](docs/mac-b-readonly-canary.md).
+- [Iteration 4A offline validation and hardware-dependent limits](docs/iteration-4a-validation.md).
+- [Historical read-only canary proposal](docs/first-madoka-read-only-canary.md).
 
 - [Full repository audit](docs/full-code-audit.md): confirmed defects, risks and treatment.
 - [Architecture, API, configuration and SQLite migration](docs/multiroom-architecture.md).
@@ -56,9 +58,11 @@ Current combined results and limits: [Iteration 3 integration acceptance](docs/i
 
 ## Compatibility and security
 
-Iteration 4B adds an explicitly injected **offline** six-controller contract fleet using closed wire models and the hardened Controller exchange path. It supports manual command/readback testing and durable session quarantine without importing a BLE driver. There is no production radio factory or physical recovery verifier. The web launcher still selects simulators exclusively; neither API/config changes nor the offline evidence resolver can enable hardware. PR #7 remains a separate one-shot canary contribution.
+Iteration 4B adds an explicitly injected **offline** six-controller contract fleet using closed wire models and the hardened Controller exchange path. It supports manual command/readback testing and durable session quarantine without importing a BLE driver. There is no production radio factory or physical recovery verifier. The web launcher still selects simulators exclusively; neither API/config changes nor the offline evidence resolver can enable hardware. The standalone canary retains its own permanent attempt record.
 
-The physical entrypoints `daikin_server.py` and `brc1h_spike.py` allow only `--selftest`; debugging/range helpers are blocked. `multiroom_app.py --real` fails before opening the DB or importing a BLE backend. The LaunchAgent template neither starts nor restarts automatically and has not been installed. No schedules or bulk commands are active.
+The standalone `madoka_readonly_canary.py` defaults to OFFLINE; `--selftest` never imports Bleak. Its explicit physical mode is isolated from the web application, requires an exact reviewed clean SHA and private UUID confirmation, and permanently consumes one attempt before discovery. There is no reset/retry path. See the runbook before any separately authorized physical test.
+
+The legacy physical entrypoints `daikin_server.py` and `brc1h_spike.py` allow only `--selftest`; debugging/range helpers are blocked. `multiroom_app.py --real` fails before opening the DB or importing a BLE backend. The LaunchAgent template neither starts nor restarts automatically and has not been installed. No schedules or bulk commands are active.
 
 The old `/api/*` API returns 410: migrate to `/api/controllers/{id}/...`, never array positions. New history is separated by identifier, uses a different DB and must not be opened with old code. An explicit import into a new copy of the original history is available; see architecture.
 
