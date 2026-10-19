@@ -4,19 +4,19 @@ from importlib.metadata import version
 
 from madoka_protocol import WRITE_CHAR, NOTIFY_CHAR, build_query, build_command, CMD_GET_FAN
 from madoka_readonly_canary import GET_COMMANDS, canonical_uuid, REVIEWED_BLEAK_VERSION
-from ..native_access import require_authorization
+from ..native_access import require_native_context, manual_transport
 from .base import BackendUnavailable
 
 
 class NativeRadio:
     """One native client, no reconnect; admission is durable before driver import."""
     def __init__(self, grant):
-        self.grant = require_authorization(grant)
+        self.grant = require_native_context(grant)
         self.identity = grant.identity
         self.client = self.device = None
         self.reserved = self.discovery_attempted = self.connect_attempted = False
         self.allowed_frames = frozenset(bytes(chunk) for command in GET_COMMANDS for chunk in build_query(command))
-        if getattr(grant, "office", False):
+        if manual_transport(grant):
             self.allowed_frames |= frozenset(bytes(c) for c in build_query(CMD_GET_FAN))
         self.write_frames = []
         self.disconnect_requested = self.disconnect_returned = False
@@ -33,9 +33,9 @@ class NativeRadio:
 
     def arm_write(self, command, args):
         """One exact ordered SET frame sequence; consume each before awaiting I/O."""
-        require_authorization(self.grant)
+        require_native_context(self.grant)
         from madoka_protocol import CMD_SET_POWER, CMD_SET_MODE, CMD_SET_FAN, CMD_SET_SETPOINT
-        if (not getattr(self.grant, "office", False) or not self.reserved or not self.is_connected
+        if (not manual_transport(self.grant) or not self.reserved or not self.is_connected
                 or self.write_frames or command not in (CMD_SET_POWER, CMD_SET_MODE, CMD_SET_FAN, CMD_SET_SETPOINT)):
             raise BackendUnavailable("Native write admission rejected")
         self.write_frames = [bytes(c) for c in build_command(command, args)]
@@ -48,7 +48,7 @@ class NativeRadio:
             return False
 
     async def discover(self, identity, timeout):
-        require_authorization(self.grant)
+        require_native_context(self.grant)
         if (not self.reserved or self.discovery_attempted or identity != self.identity
                 or timeout != 15 or version("bleak") != REVIEWED_BLEAK_VERSION):
             raise BackendUnavailable("Native discovery admission rejected")
@@ -62,11 +62,14 @@ class NativeRadio:
             return identity
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            if getattr(self.grant, "local", False):
+                from ..local_runtime import local_error
+                raise BackendUnavailable(local_error(exc, phase="discovery")) from None
             raise BackendUnavailable("Native discovery failed; STOP") from None
 
     async def connect(self, *, timeout):
-        require_authorization(self.grant)
+        require_native_context(self.grant)
         if not self.reserved or self.device is None or self.connect_attempted or timeout != 120:
             raise BackendUnavailable("Native connection admission rejected")
         self.connect_attempted = True
@@ -78,7 +81,10 @@ class NativeRadio:
             self.connected_once = True
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            if getattr(self.grant, "local", False):
+                from ..local_runtime import local_error
+                raise BackendUnavailable(local_error(exc, phase="connection")) from None
             raise BackendUnavailable("Native connection failed; STOP") from None
 
     async def _call(self, name, *args, **kwargs):
@@ -97,7 +103,7 @@ class NativeRadio:
         await asyncio.wait_for(self._call("start_notify", characteristic, callback), 120)
 
     async def write_gatt_char(self, characteristic, data, response=False):
-        require_authorization(self.grant)
+        require_native_context(self.grant)
         frame = bytes(data)
         if (not self.reserved or not self.is_connected or characteristic != WRITE_CHAR
                 or response is not False):
@@ -114,7 +120,7 @@ class NativeRadio:
     async def stop_notify(self, characteristic):
         if characteristic != NOTIFY_CHAR:
             raise BackendUnavailable("Native cleanup characteristic rejected")
-        if getattr(self.grant, "office", False) and self.callback_before_cleanup:
+        if manual_transport(self.grant) and (self.callback_before_cleanup or getattr(self.grant, "local", False)):
             from .native_release import native_snapshot
             if native_snapshot(self.client, self.identity) == (0, False):
                 return  # Native callback ended the subscription; no GATT call on a lost link.
@@ -122,7 +128,7 @@ class NativeRadio:
 
     async def disconnect(self):
         self.write_frames.clear()
-        if getattr(self.grant, "office", False):
+        if manual_transport(self.grant):
             from .native_release import native_snapshot
             self.disconnect_requested = True
             self.disconnect_started_connected = native_snapshot(self.client, self.identity)[0] == 2

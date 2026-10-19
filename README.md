@@ -1,6 +1,23 @@
 # Daikin BRC1H Mac Web Control
 
-**Complete six-controller office candidate — physical rollout HOLD.** The new explicitly authorized `madoka_office.py` runtime implements retained native connections, all manual controls, exact GET readback, durable outcomes, bounded recovery and authenticated HTTPS access. It is implemented and validated offline; native SET effects, release evidence, six-link capacity and LaunchAgent permissions still require the [single supervised commissioning session](docs/office-commissioning.md). The ordinary application defaults to six simulators and `--real` remains disabled. No Bluetooth, Mac B access, deployment or merge was performed for this candidate. See [office architecture](docs/office-native-architecture.md) and [offline evidence](docs/office-validation.md).
+Control six Daikin Madoka BRC1H controllers from the browser on the same Mac.
+
+```bash
+./run-local.sh
+```
+
+Open **http://127.0.0.1:8090**. The local mode uses the existing private inventory,
+real observations, direct manual controls and automatic bounded reconnects. It
+requires no password, TLS certificate, expiring authorization, reviewer or manual
+SHA. See the [short local installation/update and six-device check](docs/local.md).
+Implementation and automated validation remain offline; no Mac B installation,
+Bluetooth operation, merge or deployment is performed by this PR.
+
+Use `./run-local.sh --demo` for six simulators without Bluetooth. `multiroom_app.py`
+also retains its existing simulator-only interface; its `--real` stays disabled.
+The older authorized office/read-only entrypoints are retained for compatibility,
+not required by local startup. Historical office procedures below describe those
+older modes and do not add authorization requirements to Daikin Local.
 
 ## Start the DEMO
 
@@ -35,11 +52,15 @@ Optional real-Chromium integration against temporary HTTP/SQLite resources, with
 .venv-demo/bin/python integration/browser_physical_contract.py
 .venv-demo/bin/python integration/browser_native_readonly.py
 .venv-demo/bin/python integration/browser_office.py
+.venv-demo/bin/python integration/browser_local.py
 ```
 
-Current combined results and limits: [complete office validation](docs/office-validation.md). Previous source baseline: [Iteration 5 integration acceptance](docs/iteration-5-native-integration.md). Historical results: [Iteration 3 integration acceptance](docs/iteration-3-integration.md) and [Iteration 2 validation](docs/iteration-2-validation.md). The original 104 tests remain unchanged. The simplified-interface Chromium harness saves reviewed screenshots under `docs/images/`.
+Current combined results and limits: [local validation](docs/local-validation.md). Historical results: [office validation](docs/office-validation.md), [Iteration 5 integration acceptance](docs/iteration-5-native-integration.md), [Iteration 3 integration acceptance](docs/iteration-3-integration.md) and [Iteration 2 validation](docs/iteration-2-validation.md). The original 104 tests remain unchanged. The simplified-interface Chromium harness saves reviewed screenshots under `docs/images/`.
 
 ## Documentation
+
+- [Daikin Local: one-command startup, existing-data update and short physical check](docs/local.md).
+- [Local implementation review and offline validation](docs/local-validation.md).
 
 - [Complete office native architecture, command contracts and ownership evidence](docs/office-native-architecture.md).
 - [One Mac B installation, TLS, service, commissioning, update and rollback procedure — physical HOLD](docs/office-commissioning.md).
@@ -68,7 +89,7 @@ Current combined results and limits: [complete office validation](docs/office-va
 
 ## Compatibility and security
 
-Iteration 4B's explicitly injected **offline** six-controller contract fleet uses closed wire models and the hardened Controller exchange path. It supports manual command/readback testing and durable session quarantine without importing a BLE driver. Iteration 5 adds an isolated native factory, attended macOS preflight, operator authentication and explicit browser admission. Its read-only grant permits only four reviewed GET groups. The new office grant separately enables capability-scoped manual SETs, a commissioned fan GET, native release evidence and supervised recovery after a verified reboot. The ordinary launcher selects simulators exclusively. The standalone canary retains its own permanent attempt record, separate from the native web ledger and the offline ledgers.
+Iteration 4B's explicitly injected **offline** six-controller contract fleet uses closed wire models and the hardened Controller exchange path. It supports manual command/readback testing and durable session quarantine without importing a BLE driver. Iteration 5 adds an isolated native factory, attended macOS preflight, operator authentication and explicit browser admission. Its read-only grant permits only four reviewed GET groups. The new office grant separately enables capability-scoped manual SETs, a commissioned fan GET, native release evidence and supervised recovery after a verified reboot. The historical `multiroom_app.py` launcher selects simulators exclusively. The new `run-local.sh` explicitly selects native local operation, while its `--demo` remains hardware-free. The standalone canary retains its own permanent attempt record, separate from the native web ledger and the offline ledgers.
 
 The standalone `madoka_readonly_canary.py` defaults to OFFLINE; `--selftest` never imports Bleak. Its explicit physical mode is isolated from the web application, requires an exact reviewed clean SHA and private UUID confirmation, and permanently consumes one attempt before discovery. There is no reset/retry path. See the runbook before any separately authorized physical test.
 

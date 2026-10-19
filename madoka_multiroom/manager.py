@@ -49,11 +49,13 @@ class RoomManager:
             from .backends.physical_fleet import ScriptedPhysicalFleet
             from .backends.native_fleet import NativeReadonlyFleet
             from .backends.office_native import OfficeFleet
-            self.native_office = type(offline_fleet) is OfficeFleet
-            self.native_readonly = type(offline_fleet) in (NativeReadonlyFleet, OfficeFleet)
-            if type(offline_fleet) not in (ScriptedPhysicalFleet, NativeReadonlyFleet, OfficeFleet):
+            from .local_runtime import LocalFleet
+            self.native_office = type(offline_fleet) in (OfficeFleet, LocalFleet)
+            self.native_readonly = type(offline_fleet) in (NativeReadonlyFleet, OfficeFleet, LocalFleet)
+            if type(offline_fleet) not in (ScriptedPhysicalFleet, NativeReadonlyFleet, OfficeFleet, LocalFleet):
                 raise ValueError("Only the closed offline physical fleet is accepted")
             offline_fleet.validate_config(config)
+        self.local = bool(offline_fleet and getattr(offline_fleet, "local", False))
         self.config = config
         self.store = store
         store.register(config.devices)
@@ -76,18 +78,23 @@ class RoomManager:
         link_unavailable = bool(self.offline_fleet and room.backend.claimed and not room.backend.port.ready)
         stale = link_unavailable or age is None or age > self.config.stale_seconds or bool(room.failure) or self.closing
         enabled = room.config.enabled
+        last_operation = self.offline_fleet.budget.last_operation(room_id) if self.native_office else None
         return {"id": room.config.id, "name": room.config.name, "enabled": enabled,
                 "connected": enabled and not stale, "stale": stale,
                 "updated_at": room.updated_at, "age_seconds": age,
                 "stale_after_seconds": self.config.stale_seconds,
-                "error": room.failure or ("Prepared link unavailable; review required" if link_unavailable else None), "state": copy.deepcopy(room.latest),
+                "error": room.failure or (("Se ha perdido la conexión; reconectando sin repetir órdenes" if self.local else "Prepared link unavailable; review required") if link_unavailable else None), "state": copy.deepcopy(room.latest),
                 "info": dict(room.backend.info), "stats": dict(room.stats),
                 "controls_enabled": (not self.native_readonly or self.native_office) and enabled and not stale and not room.lock.locked(),
                 "manual_controls": room.backend.control_view() if self.native_office else None,
-                "last_operation": self.offline_fleet.budget.last_operation(room_id) if self.native_office else None,
+                "last_operation": last_operation,
                 "queries": room.config.queries.model_dump(), "simulated": not self.native_readonly,
-                "transport": "native-office" if self.native_office else "native-readonly" if self.native_readonly else "offline-controller-contract" if self.offline_fleet else "simulator",
+                "transport": "native-local" if self.local else "native-office" if self.native_office else "native-readonly" if self.native_readonly else "offline-controller-contract" if self.offline_fleet else "simulator",
                 "session_state": room.backend.state.value if self.offline_fleet else "simulated",
+                **({"local_controls": room.backend.controls.model_dump(mode="json"),
+                    "connection_status": "Aplicando cambio" if last_operation and last_operation["status"] == "pending" and room.lock.locked() else
+                    "Conectado" if not stale else "Conectando" if room.lock.locked() else "Desconectado"}
+                    if self.local else {}),
                 "physical_enforce_enabled": False,
                 "hardware_enabled": self.native_readonly and self.offline_fleet.admitted(room_id),
                 "protection": room.policy.view()}
@@ -170,9 +177,13 @@ class RoomManager:
                 room.failure = "Operation cancelled; recover manually"
                 self.stop_policy(room, "operation_cancelled")
                 raise
-            except Exception:
+            except Exception as exc:
                 room.stats["errors"] += 1
-                room.failure = "Operation failed; recover manually"
+                if self.local:
+                    from .local_runtime import local_error
+                    room.failure = local_error(exc)
+                else:
+                    room.failure = "Operation failed; recover manually"
                 self.stop_policy(room, "operation_failed")
                 log.exception("Room operation failed for logical id %s", room_id)
                 raise RoomUnavailable(room.failure) from None
@@ -286,13 +297,32 @@ class RoomManager:
             return self.snapshot(room_id)
         return await self.operate(room_id)
 
+    def manual_failure(self, room):
+        room.failure = ("No se pudo confirmar el cambio. No se repetirá; consulta el estado antes de otra orden."
+            if self.local else "STOP: physical outcome uncertain; inspect recorded operation and GET observations")
+        self.stop_policy(room, "native_manual_stopped")
+        return RoomUnavailable(room.failure)
+
+    @asynccontextmanager
+    async def manual_window(self):
+        if self.local:
+            # Include queue time: a request must not start a delayed SET after
+            # the browser's forty-second response window has elapsed.
+            async with asyncio.timeout(35):
+                async with self.capacity:
+                    yield
+        else:
+            async with self.capacity:
+                yield
+
     async def native_manual(self, room_id, action, value, operation_id, reason):
         if not self.native_office:
             raise RoomUnavailable("Office native control unavailable")
         room = self.room(room_id)
         if (self.closing or room.failure or not room.config.enabled or self.snapshot(room_id)["stale"]
                 or not self.offline_fleet.admitted(room_id)):
-            raise RoomUnavailable("Fresh admitted native observations required")
+            raise RoomUnavailable((room.failure or "Todavía no hay una lectura reciente del Daikin; espera a que conecte")
+                if self.local else "Fresh admitted native observations required")
         if room.lock.locked():
             raise RoomBusy("Native room busy")
         room.backend.validate_action(action, value)
@@ -302,7 +332,7 @@ class RoomManager:
             task = asyncio.current_task()
             self.operations.add(task)
             try:
-                async with self.capacity:
+                async with self.manual_window():
                     state = await room.backend.manual(action, value, operation_id, reason,
                         lambda field, desired: room.policy.desired({field: desired}))
                 room.latest, room.updated_at, room.updated_monotonic = state, time.time(), time.monotonic()
@@ -310,10 +340,19 @@ class RoomManager:
                 self.store.append(room_id, int(room.updated_at * 1000), state)
                 room.policy.observe(state, time.monotonic(), allow_correction=False)
                 room.policy.save("manual_native_confirmed", {"operation_id": operation_id, "action": action})
+            except TimeoutError:
+                if self.local and not self.offline_fleet.budget.operation(operation_id):
+                    raise RoomBusy("Las comunicaciones están ocupadas; no se ha enviado el cambio") from None
+                raise self.manual_failure(room) from None
+            except ValueError:
+                if self.local and not self.offline_fleet.budget.operation(operation_id):
+                    # Fresh pre-read rejected a value, with no SET or journal.
+                    room.latest = copy.deepcopy(room.backend.latest)
+                    room.updated_at, room.updated_monotonic = time.time(), time.monotonic()
+                    raise
+                raise self.manual_failure(room) from None
             except (Exception, asyncio.CancelledError):
-                room.failure = "STOP: physical outcome uncertain; inspect recorded operation and GET observations"
-                self.stop_policy(room, "native_manual_stopped")
-                raise RoomUnavailable(room.failure) from None
+                raise self.manual_failure(room) from None
             finally:
                 self.operations.discard(task)
         return self.snapshot(room_id)
@@ -344,16 +383,26 @@ class RoomManager:
                 self.operations.discard(task)
         return self.snapshot(room_id)
 
+    @asynccontextmanager
+    async def preparation_window(self):
+        if self.local:
+            yield  # Local backend owns its separate bounded setup semaphore.
+        else:
+            async with self.capacity:
+                yield
+
     async def poll(self, room_id: str, offset: float):
         room = self.room(room_id)
         await asyncio.sleep(offset)
         while not self.closing:
             try:
+                if self.local and room.failure and self.offline_fleet.admitted(room_id) and not self.offline_fleet.budget.pending_operation(room_id):
+                    room.failure = None
                 if self.native_office and not self.offline_fleet.admitted(room_id):
                     if room.lock.locked():
                         raise RoomBusy("Room busy")
                     async with room.lock:
-                        async with self.capacity:
+                        async with self.preparation_window():
                             try:
                                 await self.offline_fleet.ensure_room(room_id)
                             finally:
@@ -361,9 +410,9 @@ class RoomManager:
                             room.failure = None
                 if not room.failure and (self.offline_fleet is None or self.offline_fleet.admitted(room_id)):
                     await self.operate(room_id)
-            except (RoomBusy, RoomUnavailable):
+            except (RoomBusy, RoomUnavailable) as exc:
                 if self.native_office and not self.offline_fleet.admitted(room_id):
-                    room.failure = "Connection stopped or backing off; review native ownership"
+                    room.failure = str(exc) if self.local else "Connection stopped or backing off; review native ownership"
             await asyncio.sleep(room.config.queries.interval_seconds)
 
     async def start(self):

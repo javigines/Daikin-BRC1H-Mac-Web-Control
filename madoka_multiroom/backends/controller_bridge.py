@@ -12,6 +12,7 @@ from madoka_protocol import (
     CMD_SET_POWER, CMD_SET_MODE, CMD_SET_SETPOINT, CMD_SET_FAN, temp_to_bytes,
 )
 from .base import BackendUnavailable
+from ..native_access import manual_transport
 
 GETS = (CMD_GET_POWER, CMD_GET_MODE, CMD_GET_SETPOINT, CMD_GET_FAN, CMD_GET_SENSOR)
 SETS = (CMD_SET_POWER, CMD_SET_MODE, CMD_SET_SETPOINT, CMD_SET_FAN)
@@ -156,8 +157,8 @@ class HardenedControllerBridge(Controller):
         self.native = native_authorization is not None
         if self.native:
             from .native_radio import NativeRadio
-            from ..native_access import require_authorization
-            grant = require_authorization(native_authorization)
+            from ..native_access import require_native_context, manual_transport
+            grant = require_native_context(native_authorization)
             if type(radio) is not NativeRadio or radio.grant is not grant:
                 raise BackendUnavailable("Explicit native radio authorization required")
         elif type(radio) is not ScriptedRadio:
@@ -242,7 +243,7 @@ class HardenedControllerBridge(Controller):
     async def exchange_ready(self, cmd_id, args=None, timeout=6):
         if self.native:
             from madoka_readonly_canary import GET_COMMANDS
-            office = getattr(self.radio.grant, "office", False)
+            office = manual_transport(self.radio.grant)
             allowed = GET_COMMANDS + ((CMD_GET_FAN,) if office else ())
             if cmd_id not in allowed and not (office and cmd_id in SETS and self.radio.write_frames):
                 raise BackendUnavailable("Native bridge permits four GETs only")
@@ -260,7 +261,7 @@ class HardenedControllerBridge(Controller):
             self.cleanup_attempted = True
             try:
                 await cleanup_client(_CleanupCalls(self.client, self.cleanup_report))
-                if self.native and getattr(self.radio.grant, "office", False):
+                if self.native and manual_transport(self.radio.grant):
                     from .native_release import verify_live_release
                     self.radio.release_evidence = await verify_live_release(self.radio)
             except BaseException:
@@ -272,7 +273,7 @@ class HardenedControllerBridge(Controller):
         self.closed = True
         self._fail("Bridge closed; native state unverified")
         async with self.lock:
-            if (self.native and getattr(self.radio.grant, "office", False)
+            if (self.native and manual_transport(self.radio.grant)
                     and not self.radio.connect_attempted and self.radio.client is None):
                 self.radio.release_evidence = {"kind": "no_native_connect_attempted", "application_ownership_only": True}
             await self._cleanup_after_error()

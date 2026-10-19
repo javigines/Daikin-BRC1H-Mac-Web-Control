@@ -14,7 +14,7 @@ from madoka_protocol import (
     SETPOINT_EXTRA_FIELDS, temp_to_bytes,
 )
 from madoka_readonly_canary import observation
-from ..native_access import require_authorization
+from ..native_access import require_native_context, manual_transport
 from .base import BackendUnavailable
 from .controller_bridge import HardenedControllerBridge
 from .physical_fleet import PreparedDaikinBackend
@@ -76,10 +76,12 @@ class OfficeBackend(PreparedDaikinBackend):
         state["fan_id"] = None
         if self.controls.fans:
             fans = raw[CMD_GET_FAN] = await self._request(CMD_GET_FAN)
-            if any(k not in fans or len(fans[k]) != 1 or fans[k][0] not in self.controls.fans for k in (0x20, 0x21)):
+            valid = all(k in fans and type(fans[k]) is bytes and len(fans[k]) == 1 and fans[k][0] in range(1, 6) for k in (0x20, 0x21))
+            if not valid and not getattr(self.port.radio.grant, "local", False):
                 raise BackendUnavailable("Unsupported fan observations")
-            state.update(cooling_fan_id=fans[0x20][0], heating_fan_id=fans[0x21][0])
-            state["fan_id"] = fans[0x21 if mode == 4 else 0x20][0]
+            if valid:
+                state.update(cooling_fan_id=fans[0x20][0], heating_fan_id=fans[0x21][0])
+                state["fan_id"] = fans[0x21 if mode == 4 else 0x20][0]
         state["field_status"] = {key: "available" if value is not None else "not_queried" for key, value in state.items()}
         for key, oid in (("min_setpoint", 0xA3 if mode == 4 else 0xA2), ("max_setpoint", 0xB3 if mode == 4 else 0xB2)):
             value = raw[CMD_GET_SETPOINT].get(oid)
@@ -92,6 +94,12 @@ class OfficeBackend(PreparedDaikinBackend):
             state["device_max_setpoint"] = state["max_setpoint"]
             state["max_setpoint"] = min(state["max_setpoint"], self.controls.maximum)
         self.raw = raw
+        if getattr(self.port.radio.grant, "local", False) and not getattr(self, "local_configured", False):
+            # A valid power GET proves the boolean schema; a full setpoint GET
+            # proves its active target/limits. Mode/fan allowlists remain local
+            # configuration because an enum alone does not prove firmware support.
+            controls = self.controls.model_copy(update={"power": True, "setpoint": True})
+            self.controls = controls
         return state
 
     def control_view(self):
@@ -106,7 +114,8 @@ class OfficeBackend(PreparedDaikinBackend):
                 setpoint = False
         return {"power": self.controls.power and not stopped, "setpoint": bool(setpoint and not stopped),
                 "modes": list(self.controls.modes) if not stopped else [],
-                "fans": list(self.controls.fans) if not stopped and limits.get("mode_id") in (3, 4) else []}
+                "fans": list(self.controls.fans) if not stopped and limits.get("mode_id") in (3, 4)
+                    and (not getattr(self.port.radio.grant, "local", False) or limits.get("fan_id") is not None) else []}
 
     def validate_action(self, action, value):
         if action == "power" and self.controls.power and type(value) is bool:
@@ -114,7 +123,7 @@ class OfficeBackend(PreparedDaikinBackend):
         if action == "mode" and type(value) is int and value in self.controls.modes:
             return value
         if action == "fan" and type(value) is int and value in self.controls.fans:
-            if self.latest.get("mode_id") not in (3, 4):
+            if self.latest.get("mode_id") not in (3, 4) or (getattr(self.port.radio.grant, "local", False) and self.latest.get("fan_id") is None):
                 raise ValueError("Fan control requires cooling/heating mode")
             return value
         if action == "setpoint" and self.controls.setpoint:
@@ -141,6 +150,21 @@ class OfficeBackend(PreparedDaikinBackend):
             try:
                 before = await self._read(())
                 raw = copy.deepcopy(self.raw)
+                if getattr(self.port.radio.grant, "local", False):
+                    self.latest = copy.deepcopy(before)
+                    try:
+                        self.validate_action(action, value)
+                    except (ValueError, BackendUnavailable):
+                        return {"_local_rejected": True}
+                    if before[{"power": "power_on", "mode": "mode_id", "fan": "fan_id", "setpoint": "setpoint"}[action]] == value:
+                        field = {"power": "power_on", "mode": "mode_id", "fan": "fan_id", "setpoint": "setpoint"}[action]
+                        self.budget.begin_operation(self.port, self, operation_id, action, value,
+                            {"state": before, "reason": reason, "already_observed": True,
+                             "wire": {str(c): {str(k): v.hex() for k, v in obj.items()} for c, obj in raw.items()}})
+                        journaled = True
+                        authorize_desired(field, value)
+                        self.budget.finish_operation(operation_id, "confirmed", before)
+                        return before
                 if action == "setpoint":
                     args = setpoint_block(raw[CMD_GET_SETPOINT], before["mode_id"], value, self.controls)
                     command = CMD_SET_SETPOINT
@@ -191,7 +215,10 @@ class OfficeBackend(PreparedDaikinBackend):
                 raise
             finally:
                 self.port.radio.write_frames.clear()
-        return await self._execute(operation)
+        result = await self._execute(operation)
+        if result.get("_local_rejected"):
+            raise ValueError("El estado del Daikin ha cambiado; consulta la lectura antes de ajustar este control")
+        return result
 
 
 class OfficeFleet:
@@ -214,8 +241,8 @@ class OfficeFleet:
             self.retries[room_id] = 0
 
     def _backend(self, room):
-        grant = require_authorization(self.grants[room.id])
-        if not getattr(grant, "office", False) or grant.identity != room.address:
+        grant = require_native_context(self.grants[room.id])
+        if not manual_transport(grant) or grant.identity != room.address:
             raise ValueError("Office identity binding mismatch")
         return OfficeBackend(room, HardenedControllerBridge.from_native_readonly(grant), self.budget, self.office.controls[room.id])
 

@@ -60,24 +60,31 @@ class PhysicalSessionBudget:
     models the evidence workflow; no route accepts these attestations as real
     hardware evidence. Storage must be private local trustworthy durable media.
     """
-    def __init__(self, path, plan=ConnectionPlan(), *, native_authorization=None, native_grants=None):
+    def __init__(self, path, plan=ConnectionPlan(), *, native_authorization=None, native_grants=None, local_sessions=None):
         if type(plan) is not ConnectionPlan or str(path) == ":memory:":
             raise ValueError("Durable ledger and explicit connection plan required")
         self.plan, self.max_active = plan, plan.max_active
         self.native_authorization = native_authorization
-        self.native_grants = native_grants
-        self.office = bool(native_authorization and getattr(native_authorization, "office", False))
-        self.native = native_authorization is not None
+        self.local = local_sessions is not None
+        if self.local and (native_authorization is not None or native_grants is not None):
+            raise ValueError("Local sessions and legacy authorizations are separate runtimes")
+        self.native_grants = local_sessions if self.local else native_grants
+        self.office = self.local or bool(native_authorization and getattr(native_authorization, "office", False))
+        self.native = self.local or native_authorization is not None
         if self.native:
-            from ..native_access import require_authorization
-            require_authorization(native_authorization)
+            from ..native_access import require_native_context, manual_transport
+            if not self.local:
+                require_native_context(native_authorization)
             if not self.office and (plan.max_active != 1 or plan.max_operations != 1):
                 raise ValueError("Native read-only capacity must remain one")
-            if self.office and (not native_grants or any(not getattr(require_authorization(g), "office", False)
-                    or key != g.room_id for key, g in native_grants.items())):
+            if self.office and (not self.native_grants or any(not manual_transport(require_native_context(g))
+                    or key != g.room_id for key, g in self.native_grants.items())):
                 raise ValueError("Exact office grants required")
         schema = "native-readonly-v1" if self.native else "physical-contract-v1"
         self.operations = asyncio.Semaphore(plan.max_operations)
+        if self.local:
+            # Pairing/discovery cannot consume healthy rooms' exchange slots.
+            self.setup_operations = asyncio.Semaphore(plan.max_operations)
         self._reservations = {}
         self.owner_token = secrets.token_hex(24)
         self.db = None
@@ -152,8 +159,8 @@ class PhysicalSessionBudget:
         if port.native != self.native:
             raise PhysicalBackendDisabled("Native and offline ledgers cannot share sessions")
         if self.native:
-            from ..native_access import require_authorization
-            grant = require_authorization(self.native_grants.get(room) if self.office else self.native_authorization)
+            from ..native_access import require_native_context
+            grant = require_native_context(self.native_grants.get(room) if self.office else self.native_authorization)
             if port.radio.grant is not grant or port.address != grant.identity or room != grant.room_id:
                 raise PhysicalBackendDisabled("Native authorization binding mismatch")
         digest = hashlib.sha256(port.address.encode()).hexdigest()
@@ -173,7 +180,9 @@ class PhysicalSessionBudget:
             sid = secrets.token_hex(24)
             self.db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,1)", (sid, room, digest, self.owner_token, "reserved"))
             self._event(sid, "reserved_before_prepare", {"strategy": self.plan.strategy,
-                **({"reviewed_sha": grant.reviewed_sha, "authorization_reference": grant.reference}
+                **({"runtime": "local", "boot_time": grant.boot_time}
+                   if self.native and getattr(grant, "local", False) else
+                   {"reviewed_sha": grant.reviewed_sha, "authorization_reference": grant.reference}
                    if self.native else {})})
             self.db.commit()
         except BaseException:

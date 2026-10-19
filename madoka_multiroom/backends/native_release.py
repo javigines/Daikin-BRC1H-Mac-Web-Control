@@ -43,6 +43,13 @@ async def stable_absence(snapshot, *, duration=2.0):
 async def verify_live_release(radio):
     # The callback belongs to this exact client/epoch. A connected public
     # disconnect must have completed without error; early returns do not count.
+    if getattr(radio.grant, "local", False):
+        if not radio.disconnect_requested or not radio.disconnect_returned:
+            raise BackendUnavailable("No se ha completado el cierre de Bluetooth")
+        await stable_absence(lambda: native_snapshot(radio.client, radio.identity))
+        return {"kind": "local_completed_cleanup_and_native_absence", "bleak": "3.0.2",
+                "callback_seen": radio.disconnect_callback_seen,
+                "application_ownership_only": True, "global_radio_release": "not_proven"}
     if (not radio.disconnect_requested or not radio.disconnect_returned
             or not radio.disconnect_callback_seen
             or not (radio.disconnect_started_connected or radio.callback_before_cleanup)):
