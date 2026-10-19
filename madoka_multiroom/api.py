@@ -97,7 +97,7 @@ class LocalBoundary:
         await self.app(scope, receive, secured_send)
 
 
-def build_demo_app(config: AppConfig, db_path: str = ":memory:") -> FastAPI:
+def build_demo_app(config: AppConfig, db_path: str = ":memory:", *, offline_fleet=None) -> FastAPI:
     token = secrets.token_urlsafe(32)
 
     @asynccontextmanager
@@ -113,7 +113,7 @@ def build_demo_app(config: AppConfig, db_path: str = ":memory:") -> FastAPI:
                 except BlockingIOError:
                     raise RuntimeError("Database already owned by another application process") from None
             store = RoomStore(db_path, mode="demo")
-            manager = RoomManager(config, store)
+            manager = RoomManager(config, store, offline_fleet=offline_fleet)
             app.state.manager = manager
             await manager.start()
             yield
@@ -145,7 +145,7 @@ def build_demo_app(config: AppConfig, db_path: str = ":memory:") -> FastAPI:
 
     @app.exception_handler(RoomUnavailable)
     async def unavailable(request, exc):
-        return JSONResponse({"detail": "Simulated controller unavailable; recover manually"}, 503)
+        return JSONResponse({"detail": "Controller unavailable; recover manually"}, 503)
 
     def lookup(request, controller_id):
         manager = request.app.state.manager

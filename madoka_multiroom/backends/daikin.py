@@ -132,8 +132,7 @@ class SessionBudget:
 class DaikinBackend:
     def __init__(self, controller: ControllerPort, budget: SessionBudget, *, timeout=5.0,
                  setup_timeout=60.0, cleanup_timeout=25.0):
-        if type(controller) is not ScriptedController:
-            raise PhysicalBackendDisabled("Only the data-only offline Controller double is permitted")
+        self.validate_port(controller, budget)
         for name, value, upper in (("operation", timeout, 30), ("setup", setup_timeout, 180),
                                    ("cleanup", cleanup_timeout, 60)):
             if type(value) not in (int, float) or not .1 <= value <= upper:
@@ -148,6 +147,11 @@ class DaikinBackend:
         self._cleanly_closed = False
         self.info = {"model":None,"controller_version":None,"comm_version":None,
                      "backend":"offline-daikin-adapter","hardware_enabled":False}
+
+    @staticmethod
+    def validate_port(controller, budget):
+        if type(controller) is not ScriptedController or type(budget) is not SessionBudget:
+            raise PhysicalBackendDisabled("Only the data-only offline Controller double is permitted")
 
     @classmethod
     def from_physical_controller(cls, *args, **kwargs):
@@ -257,8 +261,12 @@ class DaikinBackend:
             observed = await self._read((group,))
             if observed.get(field) != value or (action == "setpoint" and any(observed[k] != value for k in ("cooling_setpoint","heating_setpoint"))):
                 raise WriteNotConfirmed("Readback does not confirm requested effect")
+            self.validate_readback(action, value, observed)
             self.latest = copy.deepcopy(observed)
         await self._execute(operation)
+
+    def validate_readback(self, action, value, observed):
+        """Extension point for stricter device contracts, after common checks."""
 
     async def close(self):
         # Mark closed before waiting, so queued work cannot start new exchanges.

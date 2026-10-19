@@ -1,6 +1,6 @@
 """Independent simulated rooms, bounded coordination and staggered polling.
 
-There is deliberately no factory for physical controllers in this iteration.
+The optional physical contract fleet accepts closed wire models only.
 The backend boundary is an async snapshot/apply/close interface, not BLE itself.
 """
 import asyncio
@@ -40,14 +40,22 @@ class Room:
 
 
 class RoomManager:
-    def __init__(self, config: AppConfig, store: RoomStore):
+    def __init__(self, config: AppConfig, store: RoomStore, *, offline_fleet=None):
+        self.offline_fleet = offline_fleet
+        if offline_fleet is not None:
+            from .backends.physical_fleet import ScriptedPhysicalFleet
+            if type(offline_fleet) is not ScriptedPhysicalFleet:
+                raise ValueError("Only the closed offline physical fleet is accepted")
+            offline_fleet.validate_config(config)
         self.config = config
         self.store = store
         store.register(config.devices)
-        self.rooms = {d.id: Room(d, Simulator(i)) for i, d in enumerate(config.devices)}
+        self.rooms = {d.id: Room(d, offline_fleet.backends[d.id] if offline_fleet else Simulator(i))
+                      for i, d in enumerate(config.devices)}
         for room_id, room in self.rooms.items():
             room.policy = PolicyEngine(store, room_id)
-        self.capacity = asyncio.Semaphore(config.max_concurrent_operations)
+        self.capacity = asyncio.Semaphore(offline_fleet.budget.plan.max_operations
+            if offline_fleet else config.max_concurrent_operations)
         self.pollers = []
         self.operations = set()
         self.closing = False
@@ -58,16 +66,21 @@ class RoomManager:
     def snapshot(self, room_id: str) -> dict:
         room = self.room(room_id)
         age = None if room.updated_monotonic is None else max(0, time.monotonic() - room.updated_monotonic)
-        stale = age is None or age > self.config.stale_seconds or bool(room.failure) or self.closing
+        link_unavailable = bool(self.offline_fleet and room.backend.claimed and not room.backend.port.ready)
+        stale = link_unavailable or age is None or age > self.config.stale_seconds or bool(room.failure) or self.closing
         enabled = room.config.enabled
         return {"id": room.config.id, "name": room.config.name, "enabled": enabled,
                 "connected": enabled and not stale, "stale": stale,
                 "updated_at": room.updated_at, "age_seconds": age,
                 "stale_after_seconds": self.config.stale_seconds,
-                "error": room.failure, "state": copy.deepcopy(room.latest),
+                "error": room.failure or ("Prepared link unavailable; review required" if link_unavailable else None), "state": copy.deepcopy(room.latest),
                 "info": dict(room.backend.info), "stats": dict(room.stats),
                 "controls_enabled": enabled and not stale and not room.lock.locked(),
                 "queries": room.config.queries.model_dump(), "simulated": True,
+                "transport": "offline-controller-contract" if self.offline_fleet else "simulator",
+                "session_state": room.backend.state.value if self.offline_fleet else "simulated",
+                "physical_enforce_enabled": False,
+                "hardware_enabled": False,
                 "protection": room.policy.view()}
 
     def stop_policy(self, room, reason):
@@ -83,6 +96,12 @@ class RoomManager:
             raise RoomUnavailable("Controller disabled, stopped or failed")
         if room.lock.locked():
             raise RoomBusy("Controller has an operation in progress")
+        if self.offline_fleet and not self.offline_fleet.admitted(room_id):
+            raise RoomUnavailable("Explicit session admission required; no lazy connection")
+        if action and self.offline_fleet:
+            if self.snapshot(room_id)["stale"]:
+                raise RoomUnavailable("Fresh observed state required for manual commands")
+            room.backend.validate_action(action, value)
         if action == "setpoint":
             value = round_setpoint(value)
             if not room.latest.get("min_setpoint", 16.0) <= value <= room.latest.get("max_setpoint", 32.0):
@@ -104,7 +123,7 @@ class RoomManager:
                                 room.stats["writes"] += 1
                             return await room.backend.snapshot(room.config.queries.fields)
                         state = await exchange()
-                        intent = room.policy.observe(state, time.monotonic())
+                        intent = room.policy.observe(state, time.monotonic(), allow_correction=self.offline_fleet is None)
                         if intent:
                             self.store.append(room_id, int(time.time() * 1000), state)
                             # The only automatic correction path is physically incapable
@@ -123,12 +142,12 @@ class RoomManager:
                 self.store.append(room_id, int(room.updated_at * 1000), state)
             except asyncio.CancelledError:
                 room.stats["cancellations"] += 1
-                room.failure = "Simulated operation cancelled; recover manually"
+                room.failure = "Operation cancelled; recover manually"
                 self.stop_policy(room, "operation_cancelled")
                 raise
             except Exception:
                 room.stats["errors"] += 1
-                room.failure = "Simulated operation failed; recover manually"
+                room.failure = "Operation failed; recover manually"
                 self.stop_policy(room, "operation_failed")
                 log.exception("Room operation failed for logical id %s", room_id)
                 raise RoomUnavailable(room.failure) from None
@@ -137,8 +156,30 @@ class RoomManager:
                 self.operations.discard(task)
         return self.snapshot(room_id)
 
+    async def prepare_room(self, room_id):
+        """Explicit admission outside ordinary request deadlines; never a retry."""
+        if self.offline_fleet is None or self.closing:
+            raise RoomUnavailable("No offline contract fleet available")
+        room = self.room(room_id)
+        if not room.config.enabled or room.failure or room.lock.locked():
+            raise RoomBusy("Room unavailable for admission")
+        async with room.lock:
+            task = asyncio.current_task()
+            self.operations.add(task)
+            try:
+                await room.backend.prepare()
+            except BaseException:
+                if room.backend.claimed:
+                    room.failure = "Session preparation failed; supervised review required"
+                    self.stop_policy(room, "session_preparation_failed")
+                raise
+            finally:
+                self.operations.discard(task)
+
     async def simulate(self, room_id: str, status: str, delay_seconds: float = 0):
         room = self.room(room_id)
+        if self.offline_fleet and type(room.backend) is not Simulator:
+            raise RoomUnavailable("Simulator administration unavailable for Controller contracts")
         if self.closing or not room.config.enabled:
             raise RoomUnavailable("Controller disabled or application closed")
         if room.lock.locked():
@@ -170,9 +211,14 @@ class RoomManager:
             raise RoomBusy("Controller busy")
         async with room.lock:
             try:
+                if self.offline_fleet and change == "policy" and (body.mode == "ENFORCE" or body.allow_auto_on):
+                    raise RoomUnavailable("Physical contract ENFORCE and auto-on are disabled")
                 if change == "policy":
                     room.policy.configure(body)
                 elif change == "desired":
+                    if self.offline_fleet:
+                        for key, value in body.values().items():
+                            room.backend.validate_action(ACTIONS[key], value)
                     room.policy.desired(body.values())
                 elif change == "restrictions":
                     room.policy.administrative(body)
@@ -186,6 +232,8 @@ class RoomManager:
 
     async def external_change(self, room_id: str, values: dict):
         room = self.room(room_id)
+        if self.offline_fleet:
+            raise RoomUnavailable("Simulator mutations unavailable for Controller contracts")
         if self.closing or not room.config.enabled:
             raise RoomUnavailable("Controller disabled or closed")
         if room.lock.locked():
@@ -212,13 +260,16 @@ class RoomManager:
         await asyncio.sleep(offset)
         while not self.closing:
             try:
-                if not room.failure:
+                if not room.failure and (self.offline_fleet is None or self.offline_fleet.admitted(room_id)):
                     await self.operate(room_id)
             except (RoomBusy, RoomUnavailable):
                 pass
             await asyncio.sleep(room.config.queries.interval_seconds)
 
     async def start(self):
+        if self.offline_fleet:
+            for room_id in self.offline_fleet.initial_admissions:
+                await self.prepare_room(room_id)
         self.pollers = [asyncio.create_task(self.poll(d.id, i * self.config.stagger_seconds))
                         for i, d in enumerate(self.config.devices) if d.enabled]
 
@@ -232,4 +283,4 @@ class RoomManager:
         results = await asyncio.gather(*(r.backend.close() for r in self.rooms.values()), return_exceptions=True)
         errors = [r for r in results if isinstance(r, BaseException)]
         if errors:
-            raise RuntimeError("Some simulated backends could not close")
+            raise RuntimeError("Some backend cleanup remains uncertain; session records retained")

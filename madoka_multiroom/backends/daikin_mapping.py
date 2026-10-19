@@ -35,7 +35,7 @@ def commands_for(fields):
     return commands
 
 
-def decode_snapshot(responses, fields):
+def decode_snapshot(responses, fields, *, strict_fan=False):
     fields = selected_fields(fields)
     for cmd in commands_for(fields):
         objects = responses.get(cmd)
@@ -69,6 +69,9 @@ def decode_snapshot(responses, fields):
         state["power_on"] = bool(integer(CMD_GET_POWER, 0x20, 0, 1, name="power_on"))
     if "fan" in fields:
         state["fan_id"] = integer(CMD_GET_FAN, 0x21 if mode == 4 else 0x20, 1, 5, name="fan_id")
+    if "fan" in fields and strict_fan:
+        state["cooling_fan_id"] = integer(CMD_GET_FAN, 0x20, 1, 5)
+        state["heating_fan_id"] = integer(CMD_GET_FAN, 0x21, 1, 5)
     if "setpoint" in fields:
         for name,oid in (("cooling_setpoint",0x20),("heating_setpoint",0x21),
                          ("min_setpoint",0xA3 if mode == 4 else 0xA2),

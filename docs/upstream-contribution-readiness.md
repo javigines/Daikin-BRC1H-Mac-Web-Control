@@ -57,3 +57,9 @@ No explicit upstream license was found in the audited snapshot; current metadata
 ## Preparation checklist before any authorized upstream proposal
 
 Recheck upstream HEAD and equivalent fixes; confirm rights; agree scope; extract a small understandable patch with only required dependencies and no private inventory; reproduce focused tests in a clean environment; disclose behavioral changes, Python/dependency requirements, untested hardware assumptions and STOP policy; include restoration/migration details when relevant. Keep fork functionality robust without forcing artificial upstream compatibility. Obtain explicit permission before opening the PR or contacting the author.
+
+## Iteration 4B extraction candidates
+
+The offline multiroom integration adds generic candidates within boundary D: explicit setup versus ready-only Controller exchanges, stricter callback validation, exact readback of both written fan fields, and durable identity/revision-bound ownership with restart quarantine. These can be proposed as separate patches after protocol/lifecycle dependencies and native behavior are independently validated. They do not require the six-room UI or office inventory. Preserve focused wire-model regressions and disclose the stricter STOP/unsupported-data behavior.
+
+The retained/managed fleet, RoomManager injection, private session ledger and simulated recovery workflow are fork architecture, not prerequisites for upstream framing fixes. `released_offline` is never native proof; a future production ledger/verifier must be separate. Native runtime activation, authenticated write authorization and hardware tests remain blocked. This iteration opens no upstream PR, contacts no author and changes no license or attribution.

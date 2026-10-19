@@ -1,6 +1,6 @@
 # Daikin BRC1H Mac Web Control · offline multiroom
 
-**Iteration 3 integrated candidate: offline validation only / HOLD real Bluetooth.** This branch runs simulators only: six independent rooms, a dashboard, history and protection policies. It does not scan, connect, pair or write over Bluetooth. It is not enabled for production.
+**Iteration 4B architecture candidate: offline validation only / HOLD real Bluetooth.** This branch runs simulators only: six independent rooms, a dashboard, history and protection policies. It does not scan, connect, pair or write over Bluetooth. It is not enabled for production.
 
 ## Start the DEMO
 
@@ -38,6 +38,9 @@ Current combined results and limits: [Iteration 3 integration acceptance](docs/i
 
 ## Documentation
 
+- [Physical multiroom architecture, durable ownership and hardware gates](docs/physical-multiroom-integration.md).
+- [Iteration 4B validation and independent PR #7 compatibility](docs/iteration-4b-validation.md).
+
 - [Integrated candidate and lifecycle investigations](docs/iteration-3-integration.md).
 - [Simplified interface](docs/iteration-3-ux.md) and [offline adapter](docs/iteration-3-ble-adapter.md).
 - [Mac B offline acceptance](docs/mac-b-offline-iteration-3.md).
@@ -52,6 +55,8 @@ Current combined results and limits: [Iteration 3 integration acceptance](docs/i
 - [English documentation normalization](docs/english-documentation-normalization.md): translation scope and checks.
 
 ## Compatibility and security
+
+Iteration 4B adds an explicitly injected **offline** six-controller contract fleet using closed wire models and the hardened Controller exchange path. It supports manual command/readback testing and durable session quarantine without importing a BLE driver. There is no production radio factory or physical recovery verifier. The web launcher still selects simulators exclusively; neither API/config changes nor the offline evidence resolver can enable hardware. PR #7 remains a separate one-shot canary contribution.
 
 The physical entrypoints `daikin_server.py` and `brc1h_spike.py` allow only `--selftest`; debugging/range helpers are blocked. `multiroom_app.py --real` fails before opening the DB or importing a BLE backend. The LaunchAgent template neither starts nor restarts automatically and has not been installed. No schedules or bulk commands are active.
 
