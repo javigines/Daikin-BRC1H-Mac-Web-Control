@@ -5,6 +5,7 @@ Only our closed data-only ScriptedController is accepted in this iteration.
 """
 import asyncio
 import copy
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
@@ -168,6 +169,17 @@ class DaikinBackend:
             self.budget.claim(self.port, self)
             self.claimed = True
 
+    @asynccontextmanager
+    async def setup_window(self):
+        if getattr(self.budget, "local", False):
+            async with self.budget.setup_operations:
+                async with asyncio.timeout(self.setup_timeout):
+                    yield
+        else:
+            async with asyncio.timeout(self.setup_timeout):
+                async with self.budget.operations:
+                    yield
+
     async def prepare(self):
         """One explicit setup phase, outside adapter and manager operation timers.
 
@@ -180,14 +192,13 @@ class DaikinBackend:
                 return
             self.state = SessionState.PREPARING
             try:
-                async with asyncio.timeout(self.setup_timeout):
-                    async with self.budget.operations:
-                        if self.closed:
-                            raise BackendUnavailable("Adapter closing before preparation")
-                        await self.port.prepare()
-                        if self.closed or not self.port.ready:
-                            raise BackendUnavailable("Preparation did not establish a ready session")
-                        self.state = SessionState.READY
+                async with self.setup_window():
+                    if self.closed:
+                        raise BackendUnavailable("Adapter closing before preparation")
+                    await self.port.prepare()
+                    if self.closed or not self.port.ready:
+                        raise BackendUnavailable("Preparation did not establish a ready session")
+                    self.state = SessionState.READY
             except (Exception, asyncio.CancelledError):
                 self.stopped = True
                 if not self.closed:

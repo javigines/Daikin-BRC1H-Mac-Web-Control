@@ -22,7 +22,7 @@ SHA = "02fa53c7773e4a551158165cab5f246a0d19b03a"
 
 
 @contextmanager
-def closed_office(directory, *, concurrency=2, port=8443):
+def closed_office(directory, *, concurrency=2, port=8443, local=False):
     directory = Path(directory)
     directory.mkdir(mode=0o700, exist_ok=True)
     rooms = demo_config().model_dump(mode="json")
@@ -37,6 +37,8 @@ def closed_office(directory, *, concurrency=2, port=8443):
         disconnect_error=False, stop_error=False, states={}, native_state_override=None,
         connected_override=None, active=0, peak=0)
     options.failed_effect_rooms = set()
+    options.external_connections = set()
+    options.native_overrides = {}
     for d in config.rooms.devices:
         block = {0x20: temp_to_bytes(22), 0x21: temp_to_bytes(21),
                  **{k: value.to_bytes(size, "big") for k, size, value in SETPOINT_EXTRA_FIELDS}}
@@ -68,14 +70,27 @@ def closed_office(directory, *, concurrency=2, port=8443):
         def identifier(self):
             return SimpleNamespace(UUIDString=lambda: self.client.identity)
         def state(self):
-            return options.native_state_override if options.native_state_override is not None else 2 if self.client.is_connected else 0
+            return options.native_overrides.get(self.client.identity, options.native_state_override if options.native_state_override is not None else 2 if self.client.is_connected else 0)
 
     class Central:
         def state(self):
             return 5
         def retrieveConnectedPeripheralsWithServices_(self, services):
             return [c._backend._peripheral for c in options.clients if
-                (options.connected_override if options.connected_override is not None else c.is_connected)]
+                (options.connected_override if options.connected_override is not None else c.is_connected)] + [
+                Peripheral(SimpleNamespace(identity=identity, is_connected=True)) for identity in options.external_connections]
+        def retrievePeripheralsWithIdentifiers_(self, identities):
+            return [next((c._backend._peripheral for c in reversed(options.clients) if c.identity == identity),
+                Peripheral(SimpleNamespace(identity=identity, is_connected=False))) for identity in identities]
+
+    class Delegate:
+        def __init__(self): self.central_manager = Central()
+        async def wait_until_ready(self): pass
+
+    class NSUUID:
+        @classmethod
+        def alloc(cls): return cls()
+        def initWithUUIDString_(self, value): return value
 
     class Scanner:
         @staticmethod
@@ -141,8 +156,12 @@ def closed_office(directory, *, concurrency=2, port=8443):
 
     bleak, cb = ModuleType("bleak"), ModuleType("CoreBluetooth")
     bleak.BleakScanner, bleak.BleakClient, cb.CBUUID = Scanner, Client, CBUUID
+    from madoka_multiroom import native_recovery
+    delegate_module, foundation = ModuleType("bleak.backends.corebluetooth.CentralManagerDelegate"), ModuleType("Foundation")
+    delegate_module.CentralManagerDelegate, foundation.NSUUID = Delegate, NSUUID
     with ExitStack() as stack:
-        stack.enter_context(patch.dict(sys.modules, {"bleak": bleak, "CoreBluetooth": cb}))
+        stack.enter_context(patch.dict(sys.modules, {"bleak": bleak, "CoreBluetooth": cb,
+            "bleak.backends.corebluetooth.CentralManagerDelegate": delegate_module, "Foundation": foundation}))
         stack.enter_context(patch.dict(os.environ))
         for key in ("CI", "MADOKA_OFFLINE_ONLY", "PYTHONPATH"):
             os.environ.pop(key, None)
@@ -154,11 +173,21 @@ def closed_office(directory, *, concurrency=2, port=8443):
         stack.enter_context(patch("madoka_multiroom.native_access.pwd.getpwuid", lambda uid: SimpleNamespace(pw_dir=str(directory))))
         stack.enter_context(patch.object(native_radio, "version", lambda name: "3.0.2"))
         stack.enter_context(patch.object(native_release, "stable_absence", fast_absence))
-        options.password = access.authorize_service(config, SHA, "closed mocked commissioning GO")
-        options.grants, _ = access.service_grants(config)
-        options.budget = PhysicalSessionBudget(directory / ".madoka-readonly-web" / "native-sessions.sqlite",
-            ConnectionPlan("retained", 6, concurrency), native_authorization=next(iter(options.grants.values())), native_grants=options.grants)
-        options.fleet = OfficeFleet(config, options.budget, options.grants)
+        stack.enter_context(patch.object(native_recovery, "stable_absence", fast_absence))
+        if local:
+            from madoka_multiroom.local_runtime import LocalConfig, LocalFleet, LocalSession
+            options.config = LocalConfig(rooms=config.rooms, controls=config.controls)
+            state = access.native_state_directory()
+            options.grants = {d.id: LocalSession(d.address, d.id, 1000) for d in config.rooms.devices}
+            options.budget = PhysicalSessionBudget(state / "native-sessions.sqlite",
+                ConnectionPlan("retained", 6, concurrency), local_sessions=options.grants)
+            options.fleet = LocalFleet(options.config, options.budget, options.grants, settings_path=state / "local-controls.json")
+        else:
+            options.password = access.authorize_service(config, SHA, "closed mocked commissioning GO")
+            options.grants, _ = access.service_grants(config)
+            options.budget = PhysicalSessionBudget(directory / ".madoka-readonly-web" / "native-sessions.sqlite",
+                ConnectionPlan("retained", 6, concurrency), native_authorization=next(iter(options.grants.values())), native_grants=options.grants)
+            options.fleet = OfficeFleet(config, options.budget, options.grants)
         try:
             yield options
         finally:

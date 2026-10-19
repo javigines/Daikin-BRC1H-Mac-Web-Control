@@ -44,6 +44,12 @@ class ManualBody(StrictModel):
     reason: str = Field(min_length=3, max_length=160)
 
 
+class LocalManualBody(StrictModel):
+    operation_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    action: Literal["power", "setpoint", "mode", "fan"]
+    value: bool | int | float
+
+
 class ReviewBody(StrictModel):
     reason: str = Field(min_length=3, max_length=160)
 
@@ -149,6 +155,35 @@ class OperatorBoundary:
         return await self.app(scope, receive, send)
 
 
+class LocalOnlyBoundary:
+    """Exact loopback authority/peer, no cross-origin access or legacy writes."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            import re
+            headers = dict(scope["headers"])
+            peer = (scope.get("client") or ("", 0))[0]
+            if (peer != "127.0.0.1" or scope.get("scheme") != "http"
+                    or headers.get(b"host") != b"127.0.0.1:8090"):
+                return await JSONResponse({"detail": "Solo se permite acceso desde este Mac en 127.0.0.1:8090"}, 403)(scope, receive, send)
+            if (headers.get(b"origin", b"http://127.0.0.1:8090") != b"http://127.0.0.1:8090"
+                    or headers.get(b"sec-fetch-site") == b"cross-site"):
+                return await JSONResponse({"detail": "Acceso de otro origen bloqueado"}, 403)(scope, receive, send)
+            approved = bool(re.fullmatch(r"/api/controllers/[a-z][a-z0-9-]{0,31}/(manual|review-outcome|local-controls)", scope["path"]))
+            if scope["method"] not in {"GET", "HEAD"} and not (scope["method"] == "POST" and approved):
+                return await JSONResponse({"detail": "Operación no disponible en el modo local"}, 403)(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
+def build_local_app(config, db_path, *, fleet):
+    from .local_runtime import LocalFleet
+    if type(fleet) is not LocalFleet or str(db_path) == ":memory:":
+        raise ValueError("Local fleet and durable real history required")
+    return _build_app(config.rooms, db_path, offline_fleet=fleet, local=True)
+
+
 def build_demo_app(config: AppConfig, db_path: str = ":memory:", *, offline_fleet=None) -> FastAPI:
     if offline_fleet is not None:
         from .backends.physical_fleet import ScriptedPhysicalFleet
@@ -173,10 +208,10 @@ def build_office_app(office, db_path, *, fleet, password):
     return _build_app(office.rooms, db_path, offline_fleet=fleet, native_password=password, office=office)
 
 
-def _build_app(config, db_path, *, offline_fleet=None, native_password=None, office=None):
+def _build_app(config, db_path, *, offline_fleet=None, native_password=None, office=None, local=False):
     token = secrets.token_urlsafe(32)
-    native = native_password is not None
-    runtime_mode = "native-office" if office else "native-readonly" if native else "demo"
+    native = native_password is not None or local
+    runtime_mode = "native-local" if local else "native-office" if office else "native-readonly" if native else "demo"
 
     @asynccontextmanager
     async def lifespan(app):
@@ -207,7 +242,9 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None, off
 
     app = FastAPI(title="Madoka · DEMO", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(LocalBoundary, token=token, authorities=office.authorities if office else None)
-    if native:
+    if local:
+        app.add_middleware(LocalOnlyBoundary)
+    elif native:
         app.add_middleware(OperatorBoundary, password=native_password, office=bool(office))
 
     @app.exception_handler(RequestValidationError)
@@ -221,11 +258,11 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None, off
 
     @app.exception_handler(RoomBusy)
     async def busy(request, exc):
-        return JSONResponse({"detail": "Controller busy; wait for current operation"}, 409)
+        return JSONResponse({"detail": "El Daikin está ocupado; espera a que termine la operación" if local else "Controller busy; wait for current operation"}, 409)
 
     @app.exception_handler(RoomUnavailable)
     async def unavailable(request, exc):
-        return JSONResponse({"detail": "Controller unavailable; recover manually"}, 503)
+        return JSONResponse({"detail": str(exc) if local else "Controller unavailable; recover manually"}, 503)
 
     def lookup(request, controller_id):
         manager = request.app.state.manager
@@ -247,6 +284,13 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None, off
 
     @app.get("/")
     async def index():
+        if local:
+            from fastapi.responses import HTMLResponse
+            page = (WEB / "index.html").read_text().replace("DEMO · Bluetooth inactivo", "Bluetooth local")
+            page = page.replace("Control local de seis salas simuladas, sin Bluetooth.", "Control local de seis Daikin Madoka.")
+            for view in ("admin", "lab"):
+                page = page.replace(f'data-view="{view}"', f'data-view="{view}" hidden')
+            return HTMLResponse(page)
         return FileResponse(WEB / "index.html")
 
     @app.get("/assets/{filename}")
@@ -257,11 +301,11 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None, off
     async def session():
         return {"mode": runtime_mode, "hardware_enabled": bool(native and any(offline_fleet.admitted(r.id) for r in config.devices)), "token": token,
                 **({"selected_id": offline_fleet.selected_id,
-                    "admission_attempted": offline_fleet.attempted} if native and not office else {})}
+                    "admission_attempted": offline_fleet.attempted} if native and not office and not local else {})}
 
     @app.post("/api/physical/admit")
     async def admit(request: Request, body: StrictModel):
-        if not native or office:
+        if not native or office or local:
             raise HTTPException(403, "Native admission unavailable in DEMO")
         manager = request.app.state.manager
         try:
@@ -304,17 +348,42 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None, off
     async def fan(request: Request, controller_id: str, body: FanBody):
         return await mutate(request, controller_id, "fan", body.speed)
 
-    @app.post("/api/controllers/{controller_id}/manual")
-    async def native_manual(request: Request, controller_id: str, body: ManualBody):
-        manager = lookup(request, controller_id)
-        try:
-            return await manager.native_manual(controller_id, body.action, body.value, body.operation_id, body.reason)
-        except ValueError:
-            raise HTTPException(422, "Unsupported native control or value") from None
+    if local:
+        from .office_access import Controls
 
-    @app.post("/api/controllers/{controller_id}/review-outcome")
-    async def review_outcome(request: Request, controller_id: str, body: ReviewBody):
-        return await lookup(request, controller_id).native_recover(controller_id, body.reason)
+        @app.post("/api/controllers/{controller_id}/manual")
+        async def local_manual(request: Request, controller_id: str, body: LocalManualBody):
+            try:
+                return await lookup(request, controller_id).native_manual(controller_id,
+                    body.action, body.value, body.operation_id, "Local browser action")
+            except ValueError:
+                raise HTTPException(422, "Este control o valor no está disponible en este Daikin") from None
+
+        @app.post("/api/controllers/{controller_id}/review-outcome")
+        async def local_observe(request: Request, controller_id: str, body: StrictModel):
+            return await lookup(request, controller_id).native_recover(controller_id, "User requested current observations")
+
+        @app.post("/api/controllers/{controller_id}/local-controls")
+        async def local_controls(request: Request, controller_id: str, body: Controls):
+            manager = lookup(request, controller_id)
+            room = manager.room(controller_id)
+            if room.lock.locked():
+                raise RoomBusy()
+            async with room.lock:
+                offline_fleet.configure_controls(controller_id, body)
+            return manager.snapshot(controller_id)
+    else:
+        @app.post("/api/controllers/{controller_id}/manual")
+        async def native_manual(request: Request, controller_id: str, body: ManualBody):
+            manager = lookup(request, controller_id)
+            try:
+                return await manager.native_manual(controller_id, body.action, body.value, body.operation_id, body.reason)
+            except ValueError:
+                raise HTTPException(422, "Unsupported native control or value") from None
+
+        @app.post("/api/controllers/{controller_id}/review-outcome")
+        async def review_outcome(request: Request, controller_id: str, body: ReviewBody):
+            return await lookup(request, controller_id).native_recover(controller_id, body.reason)
 
     @app.post("/api/controllers/{controller_id}/simulation")
     async def simulation(request: Request, controller_id: str, body: SimulationBody):

@@ -3,6 +3,7 @@ const cards = new Map();
 const rooms = document.querySelector("#rooms");
 const message = document.querySelector("#app-message");
 let token = "", polling = false, failed = false;
+let localMode = false;
 let nativeOffice = false, nativeReadonly = false, nativeAttempted = false, nativeRoomName = "";
 let admin = null, lab = null, detail = null, pendingConfirmation = null;
 const stamp = seconds => seconds ? new Date(seconds * 1000).toLocaleString("es-ES") : "Sin lecturas";
@@ -32,7 +33,7 @@ function updateControls(root, card) {
   root.querySelector(".room-temp").textContent = stale ? "—" : (state.room_temp ?? "—");
   root.querySelector(".setpoint").textContent = stale || state.setpoint == null ? "—" : `${state.setpoint}°`;
   const connection = root.querySelector(".connection");
-  connection.textContent = !data.enabled ? "Deshabilitada" : stale ? "Sin datos recientes" : "Disponible";
+  connection.textContent = localMode && data.enabled ? data.connection_status : !data.enabled ? "Deshabilitada" : stale ? "Sin datos recientes" : "Disponible";
   connection.dataset.state = stale ? "offline" : "online";
   const disabled = card.busy || stale || !data.controls_enabled;
   for (const selector of [".power", ".decrease", ".increase", ".mode", ".fan"]) {
@@ -53,6 +54,9 @@ function updateControls(root, card) {
     for (const [css,key,observed] of [["mode","modes",state.mode_id],["fan","fans",state.fan_id]]) {
       const select = root.querySelector("."+css);
       if (!select) continue;
+      if (localMode && observed == null && !select.querySelector('option[value=""]')) {
+        const unavailable = document.createElement("option"); unavailable.value = ""; unavailable.textContent = "No disponible"; select.prepend(unavailable);
+      }
       select.value = observed ?? "";
       select.disabled ||= !(caps[key]?.length);
       for (const option of select.options) option.disabled = !caps[key]?.includes(Number(option.value));
@@ -60,7 +64,9 @@ function updateControls(root, card) {
   }
   const status = root.querySelector(".operation-status");
   const outcome = data.last_operation?.status;
-  status.textContent = card.busy ? nativeOffice ? "Orden pendiente · esperando confirmación GET…" : "Aplicando…" : card.error ? card.error :
+  status.textContent = localMode ? (card.busy ? "Aplicando cambio" : card.error ||
+    (["pending","uncertain"].includes(outcome) ? "No se pudo confirmar el cambio. No se repetirá la orden." :
+      data.error || (outcome === "confirmed" ? "Cambio confirmado" : outcome === "reviewed_uncertain" ? "Estado actualizado; el cambio anterior no se confirmó" : ""))) : card.busy ? nativeOffice ? "Orden pendiente · esperando confirmación GET…" : "Aplicando…" : card.error ? card.error :
     nativeOffice && ["pending","uncertain"].includes(outcome) ? "STOP · resultado incierto. No repitas la orden. Revisa las lecturas." :
     data.error ? "Sala no disponible. Revisa la conexión y sus registros; las demás salas son independientes." :
     nativeOffice && outcome === "confirmed" ? "Cambio confirmado mediante lectura GET." :
@@ -81,7 +87,7 @@ function render(card, data) {
   el.querySelector(".decrease").setAttribute("aria-label", `Bajar temperatura de ${data.name}`);
   updateControls(el, card);
   const protection = el.querySelector(".protection-notice");
-  protection.textContent = protectionText(data.protection);
+  protection.textContent = localMode ? "" : protectionText(data.protection);
   protection.hidden = !protection.textContent;
   if (detail?.card === card) {
     updateControls(detail.el, card);
@@ -93,6 +99,11 @@ function render(card, data) {
     detail.el.querySelector(".updated").textContent = `Última lectura: ${stamp(data.updated_at)}`;
     detail.el.querySelector(".room-error").textContent = data.error || (isStale(data) ? "No hay una lectura reciente. Los controles están deshabilitados." : "");
     detail.el.querySelector(".history").disabled = failed;
+    if (localMode) {
+      let targets = detail.el.querySelector(".local-targets");
+      if (!targets) { targets = document.createElement("p"); targets.className = "local-targets muted"; detail.el.querySelector(".updated").before(targets); }
+      targets.textContent = `Objetivo en frío: ${data.state.cooling_setpoint ?? "—"} °C · en calor: ${data.state.heating_setpoint ?? "—"} °C`;
+    }
   }
   if (admin?.card === card) renderAdmin(admin);
   if (lab?.card === card) {
@@ -133,12 +144,13 @@ async function mutate(card, action, value) {
     const body = typeof value === "function" ? value(await api(endpoint(card,"").replace(/\/$/,""))) : value;
     card.data = await api(endpoint(card,action), body, nativeOffice ? action === "review-outcome" ? 210000 : 40000 : 10000);
   } catch (error) {
-    card.error = nativeOffice ? "STOP · respuesta no confirmada. No repitas la orden; consulta el resultado y solicita revisión." : error.name === "TimeoutError" ? "La operación ha tardado demasiado. Revisa el estado antes de repetir." : error.message;
+    card.error = localMode ? error.message : nativeOffice ? "STOP · respuesta no confirmada. No repitas la orden; consulta el resultado y solicita revisión." : error.name === "TimeoutError" ? "La operación ha tardado demasiado. Revisa el estado antes de repetir." : error.message;
     // A lost response does not establish whether the mutation applied.
     card.data = {...card.data,stale:true,connected:false};
-  } finally { card.busy = false; render(card,card.data); }
+  } finally { card.busy = false; render(card,card.data); updateOverview(); }
 }
 function manual(card,action,value) {
+  if (localMode) return mutate(card,"manual",{operation_id:crypto.randomUUID(),action,value});
   if (!nativeOffice) return mutate(card,action,action === "power" ? {on:value} : action === "setpoint" ? {temp:value} : action === "mode" ? {mode:value} : {speed:value});
   confirmAction(card,"Confirmar cambio físico",`Se enviará una sola orden (${names[action] || action}: ${value}). Se guardará el estado anterior y se verificará con GET. No se repetirá automáticamente.`,"manual",{operation_id:crypto.randomUUID(),action,value});
 }
@@ -162,9 +174,15 @@ function createCard(data) {
     const selects = document.querySelector("#detail-template").content.querySelector(".selects").cloneNode(true);
     el.querySelector(".power").after(selects);
     const lastRead = document.createElement("p"); lastRead.className = "last-read small muted"; el.append(lastRead);
-    const recover = document.createElement("button"); recover.className = "native-recover"; recover.textContent = "Revisar estado · sin repetir órdenes"; recover.hidden = true;
-    recover.addEventListener("click", () => confirmAction(card,"Revisar estado observado","Solo se leerá el estado. La revisión no confirma la orden anterior ni evita una cuarentena pendiente.","review-outcome",{}));
+    const recover = document.createElement("button"); recover.className = "native-recover"; recover.textContent = localMode ? "Consultar estado" : "Revisar estado · sin repetir órdenes"; recover.hidden = true;
+    recover.addEventListener("click", () => localMode ? mutate(card,"review-outcome",{}) : confirmAction(card,"Revisar estado observado","Solo se leerá el estado. La revisión no confirma la orden anterior ni evita una cuarentena pendiente.","review-outcome",{}));
     el.append(recover);
+    if (localMode) {
+      const configure = document.createElement("button"); configure.className = "local-configure"; configure.textContent = "Configurar controles";
+      configure.addEventListener("click", () => localSettings(card)); el.append(configure);
+      const hint = document.createElement("p"); hint.className = "small muted";
+      hint.textContent = "Los controles no disponibles se muestran deshabilitados."; el.append(hint);
+    }
   }
   bindControls(el,card);
   el.querySelector(".details").addEventListener("click", () => openDetail(card));
@@ -176,6 +194,25 @@ function createCard(data) {
   render(card,data);
   if (!admin && !document.querySelector("#view-admin").hidden) mountAdmin();
   if (!lab && !document.querySelector("#view-lab").hidden) mountLab();
+}
+function localSettings(card) {
+  const dialog = document.querySelector("#local-controls-dialog");
+  const controls = card.data.local_controls;
+  dialog.querySelector("h2").textContent = `Controles · ${card.data.name}`;
+  for (const key of ["power","setpoint"]) dialog.querySelector(`[name="${key}"]`).checked = controls[key];
+  for (const key of ["modes","fans"]) for (const input of dialog.querySelectorAll(`[name="${key}"]`)) input.checked = controls[key].includes(Number(input.value));
+  for (const key of ["minimum","maximum"]) dialog.querySelector(`[name="${key}"]`).value = controls[key];
+  dialog.querySelector("form").onsubmit = e => {
+    e.preventDefault();
+    if (!e.target.reportValidity()) return;
+    const patch = {};
+    for (const key of ["power","setpoint"]) patch[key] = dialog.querySelector(`[name="${key}"]`).checked;
+    for (const key of ["modes","fans"]) patch[key] = [...dialog.querySelectorAll(`[name="${key}"]:checked`)].map(input => Number(input.value));
+    for (const key of ["minimum","maximum"]) patch[key] = Number(dialog.querySelector(`[name="${key}"]`).value);
+    dialog.close(); mutate(card,"local-controls",patch);
+  };
+  dialog.querySelector(".close-local-controls").onclick = () => dialog.close();
+  dialog.showModal();
 }
 function openDetail(card) {
   const el = document.querySelector("#detail-template").content.firstElementChild.cloneNode(true);
@@ -311,10 +348,12 @@ async function poll() {
   try {
     const session = await api("/api/session");
     token = session.token;
-    nativeOffice = session.mode === "native-office";
+    localMode = session.mode === "native-local";
+    nativeOffice = session.mode === "native-office" || localMode;
     nativeReadonly = session.mode === "native-readonly";
     if (nativeOffice) {
-      document.querySelector(".demo-label").textContent = "Bluetooth · controles manuales";
+      document.querySelector(".demo-label").textContent = localMode ? "Bluetooth local" : "Bluetooth · controles manuales";
+      if (localMode) document.querySelector('[data-view="admin"]').hidden = true;
       document.querySelector('[data-view="lab"]').hidden = true;
       document.querySelector("#view-admin .small.muted").textContent = "Administración autenticada. Protección automática y encendido automático deshabilitados.";
     }

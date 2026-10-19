@@ -87,3 +87,14 @@ mocks provide reproducible tests but cannot replace physical ownership evidence.
 Attribution and the unresolved absence of an explicit upstream license are
 unchanged. No redistribution rights are inferred; no upstream PR or author
 contact is authorized or performed by this work.
+
+## Local application follow-up
+
+Daikin Local reuses the protocol and one-shot SET/readback contract with identity
+contexts rather than manufactured legacy authorization grants. Local loopback
+startup, Spanish controls and compatibility inventory paths belong to this fork.
+Potentially reusable changes are independent setup/operation deadlines, strict
+fan observation recognition, no-op/fresh-preflight handling and actual native
+absence checks. Their production hardware behavior is still unverified. Existing
+read-only/office contracts and their tests remain available; licensing constraints
+and attribution above are unchanged. See [local validation](local-validation.md).

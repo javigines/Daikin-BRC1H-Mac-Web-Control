@@ -101,3 +101,18 @@ def load_private_config(path):
             result[key] = value
         return result
     return AppConfig.model_validate(json.loads(raw, object_pairs_hook=unique))
+
+
+def manual_transport(context):
+    """Select the manual protocol contract without manufacturing authorization."""
+    from .local_runtime import LocalSession
+    return type(context) is LocalSession or (type(context) is NativeAuthorization and getattr(context, "office", False))
+
+
+def require_native_context(context):
+    from .local_runtime import LocalSession
+    if type(context) is LocalSession:
+        if os.environ.get("MADOKA_OFFLINE_ONLY") or os.environ.get("CI"):
+            raise PreflightError("Native execution is forbidden in offline tests/CI")
+        return context
+    return require_authorization(context)
