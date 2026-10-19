@@ -31,3 +31,28 @@ jobs:
               raise SystemExit('Bluetooth import guard missing')
           PY
       - run: python -m pytest -q
+  chromium:
+    runs-on: ubuntu-latest
+    env:
+      MADOKA_OFFLINE_ONLY: '1'
+      PYTHONPATH: ${{ github.workspace }}/ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m pip install -r requirements-browser.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Offline Chromium desktop and mobile
+        run: |
+          python integration/browser_demo.py
+          python integration/browser_physical_contract.py
+          python integration/browser_native_readonly.py
+          python integration/browser_office.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: offline-chromium-evidence
+          path: |
+            artifacts/*.png
+            docs/images/*.png

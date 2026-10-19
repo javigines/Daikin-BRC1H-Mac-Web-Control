@@ -63,3 +63,27 @@ Recheck upstream HEAD and equivalent fixes; confirm rights; agree scope; extract
 The offline multiroom integration adds generic candidates within boundary D: explicit setup versus ready-only Controller exchanges, stricter callback validation, exact readback of both written fan fields, and durable identity/revision-bound ownership with restart quarantine. These can be proposed as separate patches after protocol/lifecycle dependencies and native behavior are independently validated. They do not require the six-room UI or office inventory. Preserve focused wire-model regressions and disclose the stricter STOP/unsupported-data behavior.
 
 The retained/managed fleet, RoomManager injection, private session ledger and simulated recovery workflow are fork architecture, not prerequisites for upstream framing fixes. `released_offline` is never native proof; a future production ledger/verifier must be separate. Native runtime activation, authenticated write authorization and hardware tests remain blocked. This iteration opens no upstream PR, contacts no author and changes no license or attribution.
+
+
+## Complete office native candidate
+
+The [office runtime](office-native-architecture.md) extends the consolidated
+master baseline with retained six-room connections, a native evidence verifier,
+manual command journals/readbacks, bounded reconnect and HTTPS/user-session
+installation. Its [hardware gates](office-commissioning.md) remain unverified.
+
+Potential independent upstream patches are (1) exact native disconnected-state
+evidence instead of a public boolean, with pinned-backend compatibility tests;
+(2) setpoint encoding which preserves observed range/flag/limit bytes rather
+than zeroing them, with strict firmware/schema gates; and (3) one-shot manual
+SET plus raw GET comparison and cancellation tests. The second and third require
+physical firmware acceptance before claiming device compatibility. Each can be
+extracted without adopting office inventory, six-room UI, credentials, launchd
+installation or policy storage. The fixed local ledger/reboot recovery, attended
+service authorization, office HTTPS and Spanish dashboard remain fork-specific.
+No generic code embeds private office UUIDs, locations or hostnames. Closed native
+mocks provide reproducible tests but cannot replace physical ownership evidence.
+
+Attribution and the unresolved absence of an explicit upstream license are
+unchanged. No redistribution rights are inferred; no upstream PR or author
+contact is authorized or performed by this work.

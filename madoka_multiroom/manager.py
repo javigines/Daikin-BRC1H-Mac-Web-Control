@@ -43,11 +43,14 @@ class RoomManager:
     def __init__(self, config: AppConfig, store: RoomStore, *, offline_fleet=None):
         self.offline_fleet = offline_fleet
         self.native_readonly = False
+        self.native_office = False
         if offline_fleet is not None:
             from .backends.physical_fleet import ScriptedPhysicalFleet
             from .backends.native_fleet import NativeReadonlyFleet
-            self.native_readonly = type(offline_fleet) is NativeReadonlyFleet
-            if type(offline_fleet) not in (ScriptedPhysicalFleet, NativeReadonlyFleet):
+            from .backends.office_native import OfficeFleet
+            self.native_office = type(offline_fleet) is OfficeFleet
+            self.native_readonly = type(offline_fleet) in (NativeReadonlyFleet, OfficeFleet)
+            if type(offline_fleet) not in (ScriptedPhysicalFleet, NativeReadonlyFleet, OfficeFleet):
                 raise ValueError("Only the closed offline physical fleet is accepted")
             offline_fleet.validate_config(config)
         self.config = config
@@ -78,9 +81,11 @@ class RoomManager:
                 "stale_after_seconds": self.config.stale_seconds,
                 "error": room.failure or ("Prepared link unavailable; review required" if link_unavailable else None), "state": copy.deepcopy(room.latest),
                 "info": dict(room.backend.info), "stats": dict(room.stats),
-                "controls_enabled": not self.native_readonly and enabled and not stale and not room.lock.locked(),
+                "controls_enabled": (not self.native_readonly or self.native_office) and enabled and not stale and not room.lock.locked(),
+                "manual_controls": room.backend.control_view() if self.native_office else None,
+                "last_operation": self.offline_fleet.budget.last_operation(room_id) if self.native_office else None,
                 "queries": room.config.queries.model_dump(), "simulated": not self.native_readonly,
-                "transport": "native-readonly" if self.native_readonly else "offline-controller-contract" if self.offline_fleet else "simulator",
+                "transport": "native-office" if self.native_office else "native-readonly" if self.native_readonly else "offline-controller-contract" if self.offline_fleet else "simulator",
                 "session_state": room.backend.state.value if self.offline_fleet else "simulated",
                 "physical_enforce_enabled": False,
                 "hardware_enabled": self.native_readonly and self.offline_fleet.admitted(room_id),
@@ -144,6 +149,8 @@ class RoomManager:
                 room.updated_at = time.time()
                 room.updated_monotonic = time.monotonic()
                 room.stats["reads"] += 1
+                if self.native_office:
+                    self.offline_fleet.note_healthy(room_id)
                 self.store.append(room_id, int(room.updated_at * 1000), state)
             except asyncio.CancelledError:
                 room.stats["cancellations"] += 1
@@ -168,7 +175,7 @@ class RoomManager:
         room = self.room(room_id)
         if not room.config.enabled or room.failure or room.lock.locked():
             raise RoomBusy("Room unavailable for admission")
-        if self.native_readonly:
+        if self.native_readonly and not self.native_office:
             self.offline_fleet.consume_admission(room_id)
         async with room.lock:
             task = asyncio.current_task()
@@ -211,7 +218,7 @@ class RoomManager:
         return self.snapshot(room_id)
 
     async def administer(self, room_id: str, change, body):
-        if self.native_readonly:
+        if self.native_readonly and not self.native_office:
             raise RoomUnavailable("Native administration and desired-state changes are disabled")
         room = self.room(room_id)
         if self.closing or not room.config.enabled:
@@ -222,6 +229,8 @@ class RoomManager:
             try:
                 if self.offline_fleet and change == "policy" and (body.mode == "ENFORCE" or body.allow_auto_on):
                     raise RoomUnavailable("Physical contract ENFORCE and auto-on are disabled")
+                if self.native_office and change in ("desired", "reset"):
+                    raise RoomUnavailable("Native intent requires a manual operation; automatic corrections remain disabled")
                 if change == "policy":
                     room.policy.configure(body)
                 elif change == "desired":
@@ -264,15 +273,84 @@ class RoomManager:
             return self.snapshot(room_id)
         return await self.operate(room_id)
 
+    async def native_manual(self, room_id, action, value, operation_id, reason):
+        if not self.native_office:
+            raise RoomUnavailable("Office native control unavailable")
+        room = self.room(room_id)
+        if (self.closing or room.failure or not room.config.enabled or self.snapshot(room_id)["stale"]
+                or not self.offline_fleet.admitted(room_id)):
+            raise RoomUnavailable("Fresh admitted native observations required")
+        if room.lock.locked():
+            raise RoomBusy("Native room busy")
+        room.backend.validate_action(action, value)
+        if self.offline_fleet.budget.operation(operation_id):
+            raise RoomBusy("Operation identity already consumed; inspect its recorded outcome")
+        async with room.lock:
+            task = asyncio.current_task()
+            self.operations.add(task)
+            try:
+                async with self.capacity:
+                    state = await room.backend.manual(action, value, operation_id, reason,
+                        lambda field, desired: room.policy.desired({field: desired}))
+                room.latest, room.updated_at, room.updated_monotonic = state, time.time(), time.monotonic()
+                room.stats["writes"] += 1
+                self.store.append(room_id, int(room.updated_at * 1000), state)
+                room.policy.observe(state, time.monotonic(), allow_correction=False)
+                room.policy.save("manual_native_confirmed", {"operation_id": operation_id, "action": action})
+            except (Exception, asyncio.CancelledError):
+                room.failure = "STOP: physical outcome uncertain; inspect recorded operation and GET observations"
+                self.stop_policy(room, "native_manual_stopped")
+                raise RoomUnavailable(room.failure) from None
+            finally:
+                self.operations.discard(task)
+        return self.snapshot(room_id)
+
+    async def native_recover(self, room_id, reason):
+        """Explicit read-only reconciliation of uncertain intent; never replay SET."""
+        if not self.native_office or self.closing or not 3 <= len(reason.strip()) <= 160:
+            raise RoomUnavailable("Explicit office recovery required")
+        room = self.room(room_id)
+        if not room.config.enabled or room.lock.locked():
+            raise RoomBusy("Room unavailable")
+        async with room.lock:
+            task = asyncio.current_task()
+            self.operations.add(task)
+            try:
+                async with self.capacity:
+                    try:
+                        await self.offline_fleet.ensure_room(room_id, explicit=True)
+                    finally:
+                        room.backend = self.offline_fleet.backends[room_id]
+                    state = await room.backend.snapshot(room.config.queries.fields)
+                self.offline_fleet.budget.acknowledge_operations(room_id, state, reason)
+                room.policy.save("native_outcome_reviewed", {"reason": reason, "source": "authorized_operator", "state": state})
+                room.latest, room.failure = state, None
+                room.updated_at, room.updated_monotonic = time.time(), time.monotonic()
+                self.store.append(room_id, int(room.updated_at * 1000), state)
+            finally:
+                self.operations.discard(task)
+        return self.snapshot(room_id)
+
     async def poll(self, room_id: str, offset: float):
         room = self.room(room_id)
         await asyncio.sleep(offset)
         while not self.closing:
             try:
+                if self.native_office and not self.offline_fleet.admitted(room_id):
+                    if room.lock.locked():
+                        raise RoomBusy("Room busy")
+                    async with room.lock:
+                        async with self.capacity:
+                            try:
+                                await self.offline_fleet.ensure_room(room_id)
+                            finally:
+                                room.backend = self.offline_fleet.backends[room_id]
+                            room.failure = None
                 if not room.failure and (self.offline_fleet is None or self.offline_fleet.admitted(room_id)):
                     await self.operate(room_id)
             except (RoomBusy, RoomUnavailable):
-                pass
+                if self.native_office and not self.offline_fleet.admitted(room_id):
+                    room.failure = "Connection stopped or backing off; review native ownership"
             await asyncio.sleep(room.config.queries.interval_seconds)
 
     async def start(self):
@@ -289,7 +367,8 @@ class RoomManager:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        results = await asyncio.gather(*(r.backend.close() for r in self.rooms.values()), return_exceptions=True)
+        backends = self.offline_fleet.backends.values() if self.native_office else (r.backend for r in self.rooms.values())
+        results = await asyncio.gather(*(b.close() for b in backends), return_exceptions=True)
         errors = [r for r in results if isinstance(r, BaseException)]
         if errors:
             raise RuntimeError("Some backend cleanup remains uncertain; session records retained")

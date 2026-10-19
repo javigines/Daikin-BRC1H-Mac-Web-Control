@@ -1,6 +1,6 @@
 # Daikin BRC1H Mac Web Control
 
-**Iteration 5 consolidated candidate.** The ordinary application defaults to six simulators and `--real` remains disabled. A separate, explicitly gated macOS read-only entrypoint now implements actual Bleak 3.0.2 transport for one selected controller. No physical execution of this candidate has been authorized or performed. See [native architecture and validation](docs/iteration-5-native-integration.md) and the [blocked operator procedure](docs/native-readonly-web.md).
+**Complete six-controller office candidate — physical rollout HOLD.** The new explicitly authorized `madoka_office.py` runtime implements retained native connections, all manual controls, exact GET readback, durable outcomes, bounded recovery and authenticated HTTPS access. It is implemented and validated offline; native SET effects, release evidence, six-link capacity and LaunchAgent permissions still require the [single supervised commissioning session](docs/office-commissioning.md). The ordinary application defaults to six simulators and `--real` remains disabled. No Bluetooth, Mac B access, deployment or merge was performed for this candidate. See [office architecture](docs/office-native-architecture.md) and [offline evidence](docs/office-validation.md).
 
 ## Start the DEMO
 
@@ -34,11 +34,17 @@ Optional real-Chromium integration against temporary HTTP/SQLite resources, with
 .venv-demo/bin/python integration/browser_demo.py
 .venv-demo/bin/python integration/browser_physical_contract.py
 .venv-demo/bin/python integration/browser_native_readonly.py
+.venv-demo/bin/python integration/browser_office.py
 ```
 
-Current combined results and limits: [Iteration 5 integration acceptance](docs/iteration-5-native-integration.md). Historical results: [Iteration 3 integration acceptance](docs/iteration-3-integration.md) and [Iteration 2 validation](docs/iteration-2-validation.md). The original 104 tests remain unchanged. The simplified-interface Chromium harness saves reviewed screenshots under `docs/images/`.
+Current combined results and limits: [complete office validation](docs/office-validation.md). Previous source baseline: [Iteration 5 integration acceptance](docs/iteration-5-native-integration.md). Historical results: [Iteration 3 integration acceptance](docs/iteration-3-integration.md) and [Iteration 2 validation](docs/iteration-2-validation.md). The original 104 tests remain unchanged. The simplified-interface Chromium harness saves reviewed screenshots under `docs/images/`.
 
 ## Documentation
+
+- [Complete office native architecture, command contracts and ownership evidence](docs/office-native-architecture.md).
+- [One Mac B installation, TLS, service, commissioning, update and rollback procedure — physical HOLD](docs/office-commissioning.md).
+- [Office configuration template](office.example.json) (fictional UUIDs; capabilities default disabled).
+- [Offline validation and independent review](docs/office-validation.md).
 
 - [Native transport, consolidated history, tests and release/rollback](docs/iteration-5-native-integration.md).
 - [One-controller authenticated read-only web procedure — blocked pending fresh owner GO](docs/native-readonly-web.md).
@@ -62,15 +68,15 @@ Current combined results and limits: [Iteration 5 integration acceptance](docs/i
 
 ## Compatibility and security
 
-Iteration 4B's explicitly injected **offline** six-controller contract fleet uses closed wire models and the hardened Controller exchange path. It supports manual command/readback testing and durable session quarantine without importing a BLE driver. Iteration 5 adds an isolated native factory, attended macOS preflight, operator authentication and explicit browser admission. Only four reviewed GET groups can reach the native radio. The ordinary launcher selects simulators exclusively. No physical recovery verifier exists. The standalone canary retains its own permanent attempt record, separate from the native web ledger and the offline ledgers.
+Iteration 4B's explicitly injected **offline** six-controller contract fleet uses closed wire models and the hardened Controller exchange path. It supports manual command/readback testing and durable session quarantine without importing a BLE driver. Iteration 5 adds an isolated native factory, attended macOS preflight, operator authentication and explicit browser admission. Its read-only grant permits only four reviewed GET groups. The new office grant separately enables capability-scoped manual SETs, a commissioned fan GET, native release evidence and supervised recovery after a verified reboot. The ordinary launcher selects simulators exclusively. The standalone canary retains its own permanent attempt record, separate from the native web ledger and the offline ledgers.
 
 The standalone `madoka_readonly_canary.py` defaults to OFFLINE; `--selftest` never imports Bleak. Its explicit physical mode is isolated from the web application, requires an exact reviewed clean SHA and private UUID confirmation, and permanently consumes one attempt before discovery. There is no reset/retry path. See the runbook before any separately authorized physical test.
 
-The legacy physical entrypoints `daikin_server.py` and `brc1h_spike.py` allow only `--selftest`; debugging/range helpers are blocked. `multiroom_app.py --real` fails before opening the DB or importing a BLE backend. The LaunchAgent template neither starts nor restarts automatically and has not been installed. No schedules or bulk commands are active.
+The legacy physical entrypoints `daikin_server.py` and `brc1h_spike.py` allow only `--selftest`; debugging/range helpers are blocked. `multiroom_app.py --real` fails before opening the DB or importing a BLE backend. The old read-only LaunchAgent template remains unchanged. A separate uninstalled office template supports user-session startup and throttled abnormal restart; its actual Bluetooth/TCC permissions remain a commissioning gate. No schedules or bulk commands are active.
 
 The old `/api/*` API returns 410: migrate to `/api/controllers/{id}/...`, never array positions. New history is separated by identifier, uses a different DB and must not be opened with old code. An explicit import into a new copy of the original history is available; see architecture.
 
-The DEMO ephemeral local token protects mutations against CSRF; **it does not authenticate users**. The dedicated native web mode additionally requires a random ephemeral operator password for every page, asset and API request. It binds only to loopback; LAN exposure, physical writes, ENFORCE and native ownership recovery remain blocked. MONITOR notifications are events and dashboard notices; no external messages are sent.
+The DEMO ephemeral local token protects mutations against CSRF; **it does not authenticate users**. The dedicated native web mode additionally requires a random ephemeral operator password for every page, asset and API request. That read-only mode binds only to loopback and still blocks writes/recovery. The new office runtime requires attended source/config authorization and a specific private HTTPS listener for LAN use; all physical execution remains HOLD until owner authorization. Physical ENFORCE, schedules, auto-on and native restrictions remain disabled. MONITOR notifications are events and dashboard notices; no external messages are sent.
 
 ## Credits
 
