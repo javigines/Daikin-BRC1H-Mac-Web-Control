@@ -1,5 +1,7 @@
 # Upstream contribution readiness
 
+Integration note: the sibling PR history and original validation below are preserved. The current combined tree and acceptance evidence are documented in [Iteration 3 integration](iteration-3-integration.md). No target branch or existing PR was merged by this integration work.
+
 ## Status and authority
 
 This is a proposal for selective future contributions, **not a decision to contribute**. No upstream PR has been opened and its author has not been contacted. Opening a PR or contacting the author requires the owner's explicit authorization. Development remains on [this fork](https://github.com/javigines/Daikin-BRC1H-Mac-Web-Control); upstream attribution remains [txsl/cool-vibes](https://github.com/txsl/cool-vibes).

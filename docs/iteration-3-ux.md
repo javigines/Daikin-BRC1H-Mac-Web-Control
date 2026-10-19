@@ -1,5 +1,7 @@
 # Iteration 3 — routine controls separated from administration
 
+Integration note: the sibling PR history and original validation below are preserved. The current combined tree and acceptance evidence are documented in [Iteration 3 integration](iteration-3-integration.md). No target branch or existing PR was merged by this integration work.
+
 ## Identity and scope
 
 Branch `feature/ux-simplification`, independently based on PR #2 commit `92f715a469806ea61da6c87e260d7e6ed4488f25`. No backend, API, storage, policy or dependency behavior is changed. No BLE, SSH, Mac B, services, merges or deployments. The sibling documentation PR normalizes inherited documentation; this new report, comments and PR description are English, while product text remains Spanish.

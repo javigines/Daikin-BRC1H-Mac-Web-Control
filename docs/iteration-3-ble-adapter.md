@@ -2,6 +2,8 @@
 
 ## Status and dependency boundary
 
+Integration update: the original PR #4 evidence below remains historical. The [integrated candidate](iteration-3-integration.md) adds mandatory explicit preparation and fail-closed cleanup ownership; the current contract and lifecycle sections here reflect those corrections.
+
 Branch `feature/ble-adapter-offline`, independently based on PR #2 `92f715a469806ea61da6c87e260d7e6ed4488f25`. This is **adapter preparation tested with doubles**, not an operational physical backend. `multiroom_app.py --real` still rejects before DB/backend creation; legacy CLIs, write helpers and automatic services remain blocked. No driver import, address lookup, scan, connection, pairing, real write, installer setting, native lock or reconnection is added. Mac B NOT MODIFIED; HARDWARE_BLE NOT_TESTED; ENFORCE_PHYSICAL DISABLED; PRODUCTION_CHANGED NO.
 
 ```mermaid
@@ -13,7 +15,7 @@ flowchart TD
     Adapter --> Decode[Pure strict semantic mapping]
     Adapter --> Double[ScriptedController: data-only test double]
     Adapter --> Budget[SessionBudget: active and operation bounds]
-    Port[ControllerPort: request / disconnect shape] -. contract .-> Adapter
+    Port[ControllerPort: prepare / exchange_ready / disconnect] -. contract .-> Adapter
     Legacy[Hardened Controller from PR1] -. future reviewed bridge; disabled .-> Port
 ```
 
@@ -27,35 +29,35 @@ Room.backend is typed to the Protocol. Manager target checks use latest reported
 
 ## Controller bridge shape and mapping
 
-The future ControllerPort matches hardened PR 1 `request(cmd_id,args=None,timeout=6.0)->dict[int,bytes]` and `disconnect()`. Adapter never calls legacy `get_status`/`refresh`: those can hide absent values with defaults or capture errors as a dictionary. It uses raw request-object dictionaries and independent strict validation. Unknown BLE commands are not invented; existing power/mode/fan/setpoint command IDs/builders are retained.
+ControllerPort requires `prepare()`, a ready-session flag, `exchange_ready(cmd_id,args=None,timeout=6.0)->dict[int,bytes]` and `disconnect()`. The raw hardened PR #1 `Controller.request` is deliberately incompatible: it contains lazy setup. A future physical bridge must separate setup from an exchange that rejects an unavailable session without scanning, connecting or reconnecting. No such bridge is implemented. Adapter never calls legacy `get_status`/`refresh`: those can hide absent values with defaults or capture errors as a dictionary. It uses raw request-object dictionaries and independent strict validation. Unknown BLE commands are not invented; existing power/mode/fan/setpoint command IDs/builders are retained.
 
 | Requested group | Required evidence |
 | --- | --- |
-| power | GET_POWER object 0x20, exactly one byte, 0 or1 |
+| power | GET_POWER object 0x20, exactly one byte, 0 or 1 |
 | mode | GET_MODE object 0x20, exactly one byte, 0–5 |
 | fan | Mode dependency plus active cooling 0x20/heating 0x21, one byte, 1–5 |
-| setpoint | Mode dependency; cooling 0x20 and heating 0x21, two bytes each; active lower/upper limits 0xA2/ 0xB2 or0xA3/ 0xB3, two bytes; 10–40°C sanity and consistent active window |
+| setpoint | Mode dependency; cooling 0x20 and heating 0x21, two bytes each; active lower/upper limits 0xA2/0xB2 or 0xA3/0xB3, two bytes; 10–40°C sanity and consistent active window |
 | sensor | Explicit object 0x40, signed one byte,−40–80°C; explicit zero-length means unsupported, returned as None with field_status=unsupported |
 
 Missing required object/response, incorrect width/type, unsupported control value, invalid enumeration, zero/unverified range or inconsistent limits raises InvalidSnapshot and stops the adapter. Missing sensor data is an error, distinct from explicitly unsupported optional room temperature. Returned field_status describes available/unsupported values; no default power, mode, fan or limits is fabricated. Unrequested groups are not required. Byte widths, ranges and field meanings are offline schema assumptions pending real captures; rejecting unknown firmware data is deliberate, not proof of universal compatibility.
 
-Setpoints decode exact fixed-point raw/ 128; display rounding is never used to confirm an effect. A readback of23.875 cannot confirm 24.0. Both cooling/heating values must confirm a target because the retained write sets both equally. Setpoint writes first read the reported window, validate the requested 16–32°C target within it, and retain integer rounding plus the existing full range/limit field block. This does not validate zeroed limit semantics on physical hardware.
+Setpoints decode exact fixed-point raw/128; display rounding is never used to confirm an effect. A readback of 23.875 cannot confirm 24.0. Both cooling/heating values must confirm a target because the retained write sets both equally. Setpoint writes first read the reported window, validate the requested 16–32°C target within it, and retain integer rounding plus the existing full range/limit field block. This does not validate zeroed limit semantics on physical hardware.
 
 ## Coordination, STOP and cleanup
 
 Per-adapter lock covers an entire snapshot or explicit command with pre-read/readback. Concurrent same-adapter calls reject as busy rather than forming an unlimited queue. SessionBudget separately limits retained sessions (default 1, configurable 1–6) and concurrent operations (default 1, 1–6). Use one shared budget per coordinator; it detects duplicate ownership inside that budget. These counters do not certify six native connections. There is no reconnection/retry policy.
 
-Operation deadline includes semaphore wait and all exchanges. Errors, malformed replies, timeouts and cancellation latch STOP, clear latest and prevent subsequent requests until a deliberately new reviewed session. Invalid local inputs fail before admission and do not poison an existing session. A session waiting for capacity cannot later write after its deadline. Exchange guards run before **and after** every request: close during a multi-command pre-read prevents later commands/writes. An ACK is not proof of application: apply returns only after matching readback; mismatch raises WriteNotConfirmed and STOP. Observations are not an atomic physical snapshot across wire commands; other controllers can change the system between reads.
+Explicit `prepare()` must finish before any snapshot/apply call or RoomManager operation deadline begins. Its separate setup allowance defaults to 60 seconds, covering the historical 12+20+20-second phase ceilings with planning margin. This is an offline default, not a measured native guarantee; timeout cancellation remains cooperative. No operation implicitly prepares or reconnects. The ordinary five-second operation deadline includes semaphore wait and all exchanges after readiness. Errors, malformed replies, timeouts and cancellation latch STOP, clear latest and prevent subsequent requests until a deliberately new reviewed session. Invalid local inputs fail before admission and do not poison an existing session. A session waiting for capacity cannot later write after its deadline. Exchange guards run before **and after** every request: close during a multi-command pre-read prevents later commands/writes. An ACK is not proof of application: apply returns only after matching readback; mismatch raises WriteNotConfirmed and STOP. Observations are not an atomic physical snapshot across wire commands; other controllers can change the system between reads.
 
-Close marks closed/STOP before waiting for the lock. Only an admitted owner calls disconnect; rejected/unadmitted adapters cannot disconnect another owner's double. Successful close is idempotent and releases its reservation. The data-only double's disconnect is bounded and cooperative; native cleanup, cancellation resistance and ownership on uncertain disconnect must be re-evaluated before any physical implementation. No in-memory adapter STOP replaces persistent policy STOP in RoomManager; real coordinator integration is future work.
+Close marks closed/STOP and clears observations before waiting for the lock. A separate cleanup timeout defaults to 25 seconds. Only an admitted owner calls disconnect; rejected/unadmitted adapters cannot disconnect another owner's double. Successful data-only close is idempotent and releases its reservation. Any exception, timeout or cancellation, including cancellation while waiting for the lock, retains strong owner/port references and quarantines capacity. Repeated close raises CleanupUncertain without retrying or declaring success. Explicit offline-only resolution requires a reason/evidence and records a terminal non-clean release; it is not physical recovery and has no CLI/API route. Native cleanup, durable quarantine across restart and supervised physical release remain gates. No in-memory adapter STOP replaces persistent policy STOP in RoomManager; real coordinator integration is future work.
 
 ## Double and test evidence
 
-ScriptedController accepts per-command lists of Reply(data/error/delay), records calls and returns copies. It has no I/O callbacks, driver factory or address; writes do not automatically mutate observations, so readback must be separately planned. Snapshot copies are isolated.
+ScriptedController accepts per-command lists of Reply(data/error/delay), plus setup/disconnect delay/error plans, records calls and returns copies. Explicit preparation is required before any exchange. It has no I/O callbacks, driver factory or address; writes do not automatically mutate observations, so readback must be separately planned. Snapshot copies are isolated.
 
-Python 3.12 and 3.14 final suites (each): **270 PASS, 0 FAIL, 1 existing Starlette warning** (227 base tests intact plus 43 adapter regressions). Tests cover all modes and active branches, missing/unsupported/invalid fields and widths, exact readback, all four writes/full setpoint payload, ACK without effect, six sessions with two operation slots and one fault, duplicate ownership, no-owner close, session capacity, busy, capacity deadline, cancellation, close during pre-read, input rejection, idempotent cleanup and import guards. A subprocess forbids both Bleak and legacy module imports while exercising adapter import and the complete DEMO app. Physical factory/arbitrary object construction is rejected before inspecting the supplied object.
+Historical PR #4 Python 3.12 and 3.14 suites (each): **270 PASS, 0 FAIL, 1 existing Starlette warning** (227 base tests intact plus 43 adapter regressions). Tests cover all modes and active branches, missing/unsupported/invalid fields and widths, exact readback, all four writes/full setpoint payload, ACK without effect, six sessions with two operation slots and one fault, duplicate ownership, no-owner close, session capacity, busy, capacity deadline, cancellation, close during pre-read, input rejection, idempotent cleanup and import guards. A subprocess forbids both Bleak and legacy module imports while exercising adapter import and the complete DEMO app. Physical factory/arbitrary object construction is rejected before inspecting the supplied object.
 
-Independent review reproduced three P2 defects: exchanges continuing after close, rounded false readback confirmation and no-owner disconnect. All three were corrected with specific regressions; independent code revalidation 270 PASS/ 0 FAIL/ 1 warning. Final independent code and documentation review: PASS. Both offline CLI selftests also passed. The unchanged base Chromium harness validates that extracting Simulator preserves the existing UI/API flow; no new physical browser/backend mode is exposed.
+Independent review reproduced three P2 defects: exchanges continuing after close, rounded false readback confirmation and no-owner disconnect. All three were corrected with specific regressions; independent code revalidation 270 PASS/ 0 FAIL/ 1 warning. Final independent code and documentation review: PASS. Both offline CLI selftests also passed. That sibling PR used the base Chromium harness. The integrated candidate instead runs the current simplified-interface harness; see its actual combined totals and browser evidence in the [integration report](iteration-3-integration.md). No physical browser/backend mode is exposed.
 
 ## Offline Mac B handoff
 

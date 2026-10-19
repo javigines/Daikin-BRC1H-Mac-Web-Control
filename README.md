@@ -1,6 +1,6 @@
 # Daikin BRC1H Mac Web Control · offline multiroom
 
-**Iteration 2: PASS offline / HOLD real Bluetooth.** This branch runs simulators only: six independent rooms, a dashboard, history and protection policies. It does not scan, connect, pair or write over Bluetooth. It is not enabled for production.
+**Iteration 3 integrated candidate: offline validation only / HOLD real Bluetooth.** This branch runs simulators only: six independent rooms, a dashboard, history and protection policies. It does not scan, connect, pair or write over Bluetooth. It is not enabled for production.
 
 ## Start the DEMO
 
@@ -14,9 +14,9 @@ python3.12 -m venv .venv-demo
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Stop with one Ctrl+C and wait for application shutdown. The server accepts only `127.0.0.1`, an unprivileged port and one worker. Without a configuration file it uses six fictional UUIDs. Never put the office inventory in the tracked example.
 
-Each card supports temperature, mode, fan speed, power and its own history. The laboratory simulates errors, disconnections, delays, recovery and external changes. Controls are disabled when data is stale or the room has an error; other rooms can continue working.
+Each card offers target temperature, power, availability and a discreet protection notice. “Más opciones” opens mode, fan, last reading and history. “Configuración” holds administration; “Laboratorio DEMO” holds simulated errors, disconnections, delays, recovery, external changes and technical events. Controls are disabled when data is stale or the room has an error; other rooms can continue working.
 
-**Administrar protección** selects `FREE`, `MONITOR` or `ENFORCE`, protected fields and an explicitly authorized desired state. The latest reading never automatically becomes desired state. `ENFORCE` corrects simulators only, with confirmations, stabilization, cooldown, persistent attempt budgets and STOP. Automatic power-on is disabled by default. Maintenance, temporary suspension, manual reset and events are managed per room. No native Daikin locks are activated.
+In **Configuración**, “Libre”, “Supervisar cambios” and “Proteger configuración” select `FREE`, `MONITOR` and `ENFORCE`, respectively, with protected fields and an explicitly authorized desired state. The latest reading never automatically becomes desired state. `ENFORCE` corrects simulators only, with confirmations, stabilization, cooldown, persistent attempt budgets and STOP. Automatic power-on is disabled by default. Maintenance, temporary suspension, manual reset and events are managed per room. No native Daikin locks are activated.
 
 ## Offline tests
 
@@ -34,9 +34,14 @@ Optional real-Chromium integration against temporary HTTP/SQLite resources, with
 .venv-demo/bin/python integration/browser_demo.py
 ```
 
-Results and limits: [validation](docs/iteration-2-validation.md). The original 104 tests remain unchanged. Local screenshots are saved in `artifacts/`, excluded from Git.
+Current combined results and limits: [Iteration 3 integration acceptance](docs/iteration-3-integration.md). Historical results: [Iteration 2 validation](docs/iteration-2-validation.md). The original 104 tests remain unchanged. The simplified-interface Chromium harness saves reviewed screenshots under `docs/images/`.
 
 ## Documentation
+
+- [Integrated candidate and lifecycle investigations](docs/iteration-3-integration.md).
+- [Simplified interface](docs/iteration-3-ux.md) and [offline adapter](docs/iteration-3-ble-adapter.md).
+- [Mac B offline acceptance](docs/mac-b-offline-iteration-3.md).
+- [Proposed read-only canary — blocked until separate authorization](docs/first-madoka-read-only-canary.md).
 
 - [Full repository audit](docs/full-code-audit.md): confirmed defects, risks and treatment.
 - [Architecture, API, configuration and SQLite migration](docs/multiroom-architecture.md).

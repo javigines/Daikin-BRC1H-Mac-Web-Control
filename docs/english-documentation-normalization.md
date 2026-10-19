@@ -1,5 +1,7 @@
 # English documentation normalization
 
+Integration note: the sibling PR history and original validation below are preserved. The current combined tree and acceptance evidence are documented in [Iteration 3 integration](iteration-3-integration.md). No target branch or existing PR was merged by this integration work.
+
 This documentation-only sibling branch starts at PR #2, `92f715a469806ea61da6c87e260d7e6ed4488f25`. It translates all eight existing technical Markdown files into English: README and seven documents under docs/. Findings, evidence counts, exact commits, known risks, STOP procedures, commands, dependencies, source links and validation limits are retained. The dependency snapshot is already technical package data and is unchanged. UI strings and configuration room names remain Spanish; no application, tests, configuration or dependency behavior changes.
 
 The historical first physical-test command in the iteration 1 handoff is preserved with an explicit clarification that iteration 2+ entrypoints reject it. This clarification does not grant authority or provide an activation workaround. Base audit locations and historical validation totals remain historical; translation does not rerun or newly certify hardware.
