@@ -60,17 +60,22 @@ class PhysicalSessionBudget:
     models the evidence workflow; no route accepts these attestations as real
     hardware evidence. Storage must be private local trustworthy durable media.
     """
-    def __init__(self, path, plan=ConnectionPlan(), *, native_authorization=None):
+    def __init__(self, path, plan=ConnectionPlan(), *, native_authorization=None, native_grants=None):
         if type(plan) is not ConnectionPlan or str(path) == ":memory:":
             raise ValueError("Durable ledger and explicit connection plan required")
         self.plan, self.max_active = plan, plan.max_active
         self.native_authorization = native_authorization
+        self.native_grants = native_grants
+        self.office = bool(native_authorization and getattr(native_authorization, "office", False))
         self.native = native_authorization is not None
         if self.native:
             from ..native_access import require_authorization
             require_authorization(native_authorization)
-            if plan.max_active != 1 or plan.max_operations != 1:
+            if not self.office and (plan.max_active != 1 or plan.max_operations != 1):
                 raise ValueError("Native read-only capacity must remain one")
+            if self.office and (not native_grants or any(not getattr(require_authorization(g), "office", False)
+                    or key != g.room_id for key, g in native_grants.items())):
+                raise ValueError("Exact office grants required")
         schema = "native-readonly-v1" if self.native else "physical-contract-v1"
         self.operations = asyncio.Semaphore(plan.max_operations)
         self._reservations = {}
@@ -114,7 +119,11 @@ class PhysicalSessionBudget:
                 self.db.execute("""CREATE TABLE IF NOT EXISTS session_events (
                     event_id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
                     at REAL NOT NULL, kind TEXT NOT NULL, details TEXT NOT NULL)""")
-                for row in self.db.execute("SELECT * FROM sessions WHERE state!='released_offline'").fetchall():
+                self.db.execute("""CREATE TABLE IF NOT EXISTS native_operations (
+                    operation_id TEXT PRIMARY KEY, room TEXT NOT NULL, action TEXT NOT NULL,
+                    value TEXT NOT NULL, before_state TEXT NOT NULL, status TEXT NOT NULL,
+                    observed TEXT, at REAL NOT NULL)""")
+                for row in self.db.execute("SELECT * FROM sessions WHERE state NOT IN ('released_offline','released_native')").fetchall():
                     self.db.execute("UPDATE sessions SET state='quarantined',revision=revision+1 WHERE session_id=?", (row["session_id"],))
                     self._event(row["session_id"], "restart_quarantine", {})
         except BaseException:
@@ -127,7 +136,7 @@ class PhysicalSessionBudget:
 
     @property
     def owners(self):
-        return frozenset(r[0] for r in self.db.execute("SELECT session_id FROM sessions WHERE state!='released_offline'"))
+        return frozenset(r[0] for r in self.db.execute("SELECT session_id FROM sessions WHERE state NOT IN ('released_offline','released_native')"))
 
     @property
     def quarantined(self):
@@ -144,7 +153,7 @@ class PhysicalSessionBudget:
             raise PhysicalBackendDisabled("Native and offline ledgers cannot share sessions")
         if self.native:
             from ..native_access import require_authorization
-            grant = require_authorization(self.native_authorization)
+            grant = require_authorization(self.native_grants.get(room) if self.office else self.native_authorization)
             if port.radio.grant is not grant or port.address != grant.identity or room != grant.room_id:
                 raise PhysicalBackendDisabled("Native authorization binding mismatch")
         digest = hashlib.sha256(port.address.encode()).hexdigest()
@@ -157,7 +166,7 @@ class PhysicalSessionBudget:
             bound = self.db.execute("SELECT room FROM bindings WHERE digest=?", (digest,)).fetchone()
             if bound[0] != room:
                 raise PhysicalBackendDisabled("Identity already bound to another room")
-            if self.db.execute("SELECT 1 FROM sessions WHERE digest=? AND state!='released_offline'", (digest,)).fetchone():
+            if self.db.execute("SELECT 1 FROM sessions WHERE digest=? AND state NOT IN ('released_offline','released_native')", (digest,)).fetchone():
                 raise BackendBusy("Identity has unresolved session ownership")
             if len(self.owners) >= self.max_active:
                 raise BackendBusy("Durable session capacity reached; no automatic rotation")
@@ -179,7 +188,7 @@ class PhysicalSessionBudget:
         if entry is None or entry[0] is not port or entry[1] is not owner:
             raise PhysicalBackendDisabled("Session owner mismatch")
         row = self.db.execute("SELECT * FROM sessions WHERE session_id=?", (entry[2],)).fetchone()
-        if row is None or row["owner"] != self.owner_token or row["state"] == "released_offline":
+        if row is None or row["owner"] != self.owner_token or row["state"] in ("released_offline", "released_native"):
             raise PhysicalBackendDisabled("Durable owner mismatch")
         return row
 
@@ -198,8 +207,55 @@ class PhysicalSessionBudget:
         self.transition(port, owner, "quarantined")
 
     def release(self, port, owner):
+        if self.office and getattr(port.radio, "release_evidence", None) and not port.cleanup_failed:
+            row = self._owned(port, owner)
+            with self.db:
+                self.db.execute("UPDATE sessions SET state='released_native',revision=revision+1 WHERE session_id=?",
+                                (row["session_id"],))
+                self._event(row["session_id"], "native_application_ownership_released", port.radio.release_evidence)
+            del self._reservations[id(port)]
+            port.radio.reserved = False
+            return
         self.quarantine(port, owner)
         raise CleanupUncertain("Public disconnect does not prove native release; review required")
+
+    def operation(self, operation_id):
+        row = self.db.execute("SELECT * FROM native_operations WHERE operation_id=?", (operation_id,)).fetchone()
+        return dict(row) if row else None
+
+    def last_operation(self, room):
+        row = self.db.execute("SELECT * FROM native_operations WHERE room=? ORDER BY rowid DESC LIMIT 1", (room,)).fetchone()
+        if row is None:
+            return None
+        return {**dict(row), "before_state": json.loads(row["before_state"]),
+                "value": json.loads(row["value"]), "observed": json.loads(row["observed"]) if row["observed"] else None}
+
+    def recent_admissions(self, room, seconds=600):
+        return self.db.execute("SELECT COUNT(*) FROM session_events e JOIN sessions s USING(session_id) WHERE s.room=? AND e.kind='reserved_before_prepare' AND e.at>?",
+                               (room, time.time()-seconds)).fetchone()[0]
+
+    def pending_operation(self, room):
+        return bool(self.db.execute("SELECT 1 FROM native_operations WHERE room=? AND status IN ('pending','uncertain')", (room,)).fetchone())
+
+    def begin_operation(self, port, owner, operation_id, action, value, before):
+        self._owned(port, owner)
+        if self.operation(operation_id) or self.pending_operation(owner.room_id):
+            raise BackendBusy("Duplicate or unresolved native mutation; never replay")
+        with self.db:
+            self.db.execute("INSERT INTO native_operations VALUES (?,?,?,?,?,'pending',NULL,?)",
+                (operation_id, owner.room_id, action, json.dumps(value), json.dumps(before), time.time()))
+
+    def finish_operation(self, operation_id, status, observed=None):
+        if status not in ("confirmed", "uncertain"):
+            raise ValueError("Invalid native mutation outcome")
+        with self.db:
+            self.db.execute("UPDATE native_operations SET status=?,observed=? WHERE operation_id=? AND status='pending'",
+                (status, json.dumps(observed) if observed is not None else None, operation_id))
+
+    def acknowledge_operations(self, room, observed, reason):
+        with self.db:
+            self.db.execute("UPDATE native_operations SET status='reviewed_uncertain',observed=? WHERE room=? AND status IN ('pending','uncertain')",
+                            (json.dumps({"state": observed, "reason": reason}), room))
 
     def resolve_offline(self, evidence):
         if self.native:

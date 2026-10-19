@@ -11,6 +11,7 @@ from pathlib import Path
 import pwd
 import stat
 import sys
+import time
 import warnings
 
 from madoka_readonly_canary import (
@@ -34,6 +35,8 @@ class NativeAuthorization:
 def require_authorization(grant):
     if type(grant) is not NativeAuthorization or os.environ.get("MADOKA_OFFLINE_ONLY"):
         raise PreflightError("Native execution disabled or authorization absent")
+    if getattr(grant, "office", False) and time.time() >= grant.expires:
+        raise PreflightError("Office authorization expired; STOP")
     return grant
 
 

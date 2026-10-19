@@ -242,7 +242,9 @@ class HardenedControllerBridge(Controller):
     async def exchange_ready(self, cmd_id, args=None, timeout=6):
         if self.native:
             from madoka_readonly_canary import GET_COMMANDS
-            if cmd_id not in GET_COMMANDS or args:
+            office = getattr(self.radio.grant, "office", False)
+            allowed = GET_COMMANDS + ((CMD_GET_FAN,) if office else ())
+            if cmd_id not in allowed and not (office and cmd_id in SETS and self.radio.write_frames):
                 raise BackendUnavailable("Native bridge permits four GETs only")
         if cmd_id not in GETS + SETS:
             raise ValueError("Command not allowed")
@@ -258,6 +260,9 @@ class HardenedControllerBridge(Controller):
             self.cleanup_attempted = True
             try:
                 await cleanup_client(_CleanupCalls(self.client, self.cleanup_report))
+                if self.native and getattr(self.radio.grant, "office", False):
+                    from .native_release import verify_live_release
+                    self.radio.release_evidence = await verify_live_release(self.radio)
             except BaseException:
                 self.cleanup_failed = True
                 raise
@@ -267,4 +272,7 @@ class HardenedControllerBridge(Controller):
         self.closed = True
         self._fail("Bridge closed; native state unverified")
         async with self.lock:
+            if (self.native and getattr(self.radio.grant, "office", False)
+                    and not self.radio.connect_attempted and self.radio.client is None):
+                self.radio.release_evidence = {"kind": "no_native_connect_attempted", "application_ownership_only": True}
             await self._cleanup_after_error()

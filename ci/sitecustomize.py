@@ -10,7 +10,7 @@ import sys
 
 class OfflineBluetoothGuard(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname == "bleak" or fullname.startswith("bleak."):
+        if fullname in ("bleak", "CoreBluetooth", "Foundation", "objc") or fullname.startswith("bleak."):
             raise RuntimeError("Real Bluetooth imports are forbidden in offline CI")
 
 

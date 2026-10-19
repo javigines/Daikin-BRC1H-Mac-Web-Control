@@ -37,6 +37,17 @@ class FanBody(StrictModel):
     speed: int = Field(ge=1, le=5)
 
 
+class ManualBody(StrictModel):
+    operation_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    action: Literal["power", "setpoint", "mode", "fan"]
+    value: bool | int | float
+    reason: str = Field(min_length=3, max_length=160)
+
+
+class ReviewBody(StrictModel):
+    reason: str = Field(min_length=3, max_length=160)
+
+
 class SimulationBody(StrictModel):
     status: Literal["online", "disconnected", "error"]
     delay_ms: int = Field(default=0, ge=0, le=2000)
@@ -44,11 +55,13 @@ class SimulationBody(StrictModel):
 
 class LocalBoundary:
     """ASGI body cap before JSON parsing; exact same-origin mutation checks."""
-    def __init__(self, app, token: str):
+    def __init__(self, app, token: str, authorities=None):
         self.app = app
         self.token = token
         self.window_start = time.monotonic()
         self.requests = 0
+        self.authorities = authorities
+        self.client_windows = {}
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -57,18 +70,30 @@ class LocalBoundary:
         host = headers.get(b"host", b"").decode("latin-1")
         # Only explicit loopback hostnames; no proxy forwarded-header trust.
         import re
-        if not re.fullmatch(r"(127\.0\.0\.1|localhost)(:[0-9]{1,5})?", host):
+        valid_host = (host in self.authorities and scope.get("scheme") == "https") if self.authorities else bool(re.fullmatch(r"(127\.0\.0\.1|localhost)(:[0-9]{1,5})?", host))
+        if not valid_host:
             return await JSONResponse({"detail": "Invalid host"}, 400)(scope, receive, send)
         now = time.monotonic()
-        if now - self.window_start >= 60:
-            self.window_start, self.requests = now, 0
-        self.requests += 1
-        if self.requests > 600:
+        if self.authorities:
+            # Direct TLS client address only; forwarded headers are never trusted.
+            client = (scope.get("client") or ("unknown", 0))[0]
+            self.client_windows = {key: value for key, value in self.client_windows.items() if now-value[0] < 60}
+            if client not in self.client_windows and len(self.client_windows) >= 512:
+                return await JSONResponse({"detail": "Client capacity reached"}, 429)(scope, receive, send)
+            started, count = self.client_windows.get(client, (now, 0))
+            self.client_windows[client] = (started, count+1)
+            exceeded = count >= 1200
+        else:
+            if now - self.window_start >= 60:
+                self.window_start, self.requests = now, 0
+            self.requests += 1
+            exceeded = self.requests > 600
+        if exceeded:
             return await JSONResponse({"detail": "Local request limit exceeded"}, 429,
                                       headers={"Retry-After": "60"})(scope, receive, send)
         if scope["method"] not in {"GET", "HEAD", "OPTIONS"}:
             origin = headers.get(b"origin")
-            if (origin is not None and origin != ("http://" + host).encode()
+            if (origin is not None and origin != (("https://" if self.authorities else "http://") + host).encode()
                     or headers.get(b"sec-fetch-site") == b"cross-site"
                     or not secrets.compare_digest(headers.get(b"x-demo-token", b""), self.token.encode())):
                 return await JSONResponse({"detail": "Local mutation token/origin required"}, 403)(scope, receive, send)
@@ -104,9 +129,10 @@ class OperatorBoundary:
     Basic authentication is confined to loopback HTTP. LAN access is not offered.
     CSRF/origin checks are still enforced independently by LocalBoundary.
     """
-    def __init__(self, app, password):
+    def __init__(self, app, password, office=False):
         self.app = app
         self.expected = b"Basic " + base64.b64encode(("operator:" + password).encode())
+        self.office = office
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
@@ -115,8 +141,10 @@ class OperatorBoundary:
                 return await JSONResponse({"detail": "Operator authentication required"}, 401,
                     headers={"WWW-Authenticate": 'Basic realm="Madoka read-only", charset="UTF-8"',
                              "Cache-Control": "no-store"})(scope, receive, send)
-            if scope["method"] not in {"GET", "HEAD"} and not (
-                    scope["method"] == "POST" and scope["path"] == "/api/physical/admit"):
+            import re
+            approved = (bool(re.fullmatch(r"/api/controllers/[a-z][a-z0-9-]{0,31}/(manual|review-outcome|policy|restrictions)", scope["path"]))
+                        if self.office else scope["path"] == "/api/physical/admit")
+            if scope["method"] not in {"GET", "HEAD"} and not (scope["method"] == "POST" and approved):
                 return await JSONResponse({"detail": "Native runtime is read-only"}, 403)(scope, receive, send)
         return await self.app(scope, receive, send)
 
@@ -138,10 +166,17 @@ def build_native_readonly_app(config, db_path, *, fleet, password):
     return _build_app(config, db_path, offline_fleet=fleet, native_password=password)
 
 
-def _build_app(config, db_path, *, offline_fleet=None, native_password=None):
+def build_office_app(office, db_path, *, fleet, password):
+    from .backends.office_native import OfficeFleet
+    if type(fleet) is not OfficeFleet or len(password) < 40 or str(db_path) == ":memory:":
+        raise ValueError("Scoped office fleet, durable history and strong credentials required")
+    return _build_app(office.rooms, db_path, offline_fleet=fleet, native_password=password, office=office)
+
+
+def _build_app(config, db_path, *, offline_fleet=None, native_password=None, office=None):
     token = secrets.token_urlsafe(32)
     native = native_password is not None
-    runtime_mode = "native-readonly" if native else "demo"
+    runtime_mode = "native-office" if office else "native-readonly" if native else "demo"
 
     @asynccontextmanager
     async def lifespan(app):
@@ -171,9 +206,9 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None):
                     lock_file.close()
 
     app = FastAPI(title="Madoka · DEMO", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    app.add_middleware(LocalBoundary, token=token)
+    app.add_middleware(LocalBoundary, token=token, authorities=office.authorities if office else None)
     if native:
-        app.add_middleware(OperatorBoundary, password=native_password)
+        app.add_middleware(OperatorBoundary, password=native_password, office=bool(office))
 
     @app.exception_handler(RequestValidationError)
     async def invalid(request, exc):
@@ -220,13 +255,13 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None):
 
     @app.get("/api/session")
     async def session():
-        return {"mode": runtime_mode, "hardware_enabled": bool(native and offline_fleet.admitted(offline_fleet.selected_id)), "token": token,
+        return {"mode": runtime_mode, "hardware_enabled": bool(native and any(offline_fleet.admitted(r.id) for r in config.devices)), "token": token,
                 **({"selected_id": offline_fleet.selected_id,
-                    "admission_attempted": offline_fleet.attempted} if native else {})}
+                    "admission_attempted": offline_fleet.attempted} if native and not office else {})}
 
     @app.post("/api/physical/admit")
     async def admit(request: Request, body: StrictModel):
-        if not native:
+        if not native or office:
             raise HTTPException(403, "Native admission unavailable in DEMO")
         manager = request.app.state.manager
         try:
@@ -268,6 +303,18 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None):
     @app.post("/api/controllers/{controller_id}/fan")
     async def fan(request: Request, controller_id: str, body: FanBody):
         return await mutate(request, controller_id, "fan", body.speed)
+
+    @app.post("/api/controllers/{controller_id}/manual")
+    async def native_manual(request: Request, controller_id: str, body: ManualBody):
+        manager = lookup(request, controller_id)
+        try:
+            return await manager.native_manual(controller_id, body.action, body.value, body.operation_id, body.reason)
+        except ValueError:
+            raise HTTPException(422, "Unsupported native control or value") from None
+
+    @app.post("/api/controllers/{controller_id}/review-outcome")
+    async def review_outcome(request: Request, controller_id: str, body: ReviewBody):
+        return await lookup(request, controller_id).native_recover(controller_id, body.reason)
 
     @app.post("/api/controllers/{controller_id}/simulation")
     async def simulation(request: Request, controller_id: str, body: SimulationBody):

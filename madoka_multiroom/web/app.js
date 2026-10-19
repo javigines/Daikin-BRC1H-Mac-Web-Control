@@ -3,7 +3,7 @@ const cards = new Map();
 const rooms = document.querySelector("#rooms");
 const message = document.querySelector("#app-message");
 let token = "", polling = false, failed = false;
-let nativeReadonly = false, nativeAttempted = false, nativeRoomName = "";
+let nativeOffice = false, nativeReadonly = false, nativeAttempted = false, nativeRoomName = "";
 let admin = null, lab = null, detail = null, pendingConfirmation = null;
 const stamp = seconds => seconds ? new Date(seconds * 1000).toLocaleString("es-ES") : "Sin lecturas";
 const names = {setpoint:"Temperatura",mode_id:"Modo",fan_id:"Ventilador",power_on:"Encendido"};
@@ -45,8 +45,30 @@ function updateControls(root, card) {
   power.disabled ||= state.power_on == null;
   root.querySelector(".decrease").disabled ||= state.setpoint == null || state.setpoint <= state.min_setpoint;
   root.querySelector(".increase").disabled ||= state.setpoint == null || state.setpoint >= state.max_setpoint;
+  if (nativeOffice) {
+    const caps = data.manual_controls || {};
+    power.disabled ||= !caps.power;
+    root.querySelector(".decrease").disabled ||= !caps.setpoint;
+    root.querySelector(".increase").disabled ||= !caps.setpoint;
+    for (const [css,key,observed] of [["mode","modes",state.mode_id],["fan","fans",state.fan_id]]) {
+      const select = root.querySelector("."+css);
+      if (!select) continue;
+      select.value = observed ?? "";
+      select.disabled ||= !(caps[key]?.length);
+      for (const option of select.options) option.disabled = !caps[key]?.includes(Number(option.value));
+    }
+  }
   const status = root.querySelector(".operation-status");
-  status.textContent = card.busy ? "Aplicando…" : card.error ? card.error : data.error ? "Revisa la disponibilidad de esta sala." : "";
+  const outcome = data.last_operation?.status;
+  status.textContent = card.busy ? nativeOffice ? "Orden pendiente · esperando confirmación GET…" : "Aplicando…" : card.error ? card.error :
+    nativeOffice && ["pending","uncertain"].includes(outcome) ? "STOP · resultado incierto. No repitas la orden. Revisa las lecturas." :
+    data.error ? "Sala no disponible. Revisa la conexión y sus registros; las demás salas son independientes." :
+    nativeOffice && outcome === "confirmed" ? "Cambio confirmado mediante lectura GET." :
+    nativeOffice && outcome === "reviewed_uncertain" ? "Estado observado revisado; la orden anterior sigue sin confirmar." : "";
+  const lastRead = root.querySelector(".last-read");
+  if (lastRead) lastRead.textContent = `Última lectura: ${stamp(data.updated_at)}`;
+  const recover = root.querySelector(".native-recover");
+  if (recover) { recover.hidden = !data.error && !["pending","uncertain"].includes(outcome); recover.disabled = card.busy || failed; }
   status.dataset.error = String(Boolean(card.error || data.error));
   root.setAttribute("aria-busy", String(card.busy));
 }
@@ -94,6 +116,11 @@ function renderAdmin(view) {
   el.querySelector(".toggle-maintenance").textContent = p.maintenance ? "Finalizar mantenimiento" : "Activar mantenimiento";
   el.querySelector(".restrictions-status").textContent = `${p.maintenance ? "Mantenimiento activo." : "Mantenimiento inactivo."} ${p.suspended ? "Suspensión hasta " + stampTime(p.suspended_until) : "Sin suspensión temporal."}`;
   for (const button of el.querySelectorAll("button")) button.disabled = card.busy || failed || !card.data.enabled;
+  if (nativeOffice) {
+    el.querySelector('.policy-mode option[value="ENFORCE"]').disabled = true;
+    el.querySelector(".allow-auto-on").disabled = true;
+    for (const css of ["save-desired","reset-budget"]) el.querySelector("."+css).disabled = true;
+  }
 }
 const stampTime = stamp;
 async function mutate(card, action, value) {
@@ -104,21 +131,41 @@ async function mutate(card, action, value) {
     // Read the latest opposite restriction at confirmation time, not when the
     // dialog opened. Never replay a mutation after an ambiguous response.
     const body = typeof value === "function" ? value(await api(endpoint(card,"").replace(/\/$/,""))) : value;
-    card.data = await api(endpoint(card,action), body);
+    card.data = await api(endpoint(card,action), body, nativeOffice ? action === "review-outcome" ? 210000 : 40000 : 10000);
   } catch (error) {
-    card.error = error.name === "TimeoutError" ? "La operación ha tardado demasiado. Revisa el estado antes de repetir." : error.message;
+    card.error = nativeOffice ? "STOP · respuesta no confirmada. No repitas la orden; consulta el resultado y solicita revisión." : error.name === "TimeoutError" ? "La operación ha tardado demasiado. Revisa el estado antes de repetir." : error.message;
     // A lost response does not establish whether the mutation applied.
     card.data = {...card.data,stale:true,connected:false};
   } finally { card.busy = false; render(card,card.data); }
 }
+function manual(card,action,value) {
+  if (!nativeOffice) return mutate(card,action,action === "power" ? {on:value} : action === "setpoint" ? {temp:value} : action === "mode" ? {mode:value} : {speed:value});
+  confirmAction(card,"Confirmar cambio físico",`Se enviará una sola orden (${names[action] || action}: ${value}). Se guardará el estado anterior y se verificará con GET. No se repetirá automáticamente.`,"manual",{operation_id:crypto.randomUUID(),action,value});
+}
 function bindControls(el,card) {
-  el.querySelector(".power").addEventListener("click", () => mutate(card,"power",{on:!card.data.state.power_on}));
-  for (const [selector,delta] of [[".decrease",-1],[".increase",1]]) el.querySelector(selector).addEventListener("click", () => mutate(card,"setpoint",{temp:card.data.state.setpoint+delta}));
+  el.querySelector(".power").addEventListener("click", () => manual(card,"power",!card.data.state.power_on));
+  for (const [selector,delta] of [[".decrease",-1],[".increase",1]]) el.querySelector(selector).addEventListener("click", () => {
+    const state = card.data.state;
+    const value = nativeOffice ? Math.max(state.min_setpoint,Math.min(state.max_setpoint,state.setpoint+delta)) : state.setpoint+delta;
+    manual(card,"setpoint",value);
+  });
+  for (const [css,action] of [["mode","mode"],["fan","fan"]]) {
+    const select = el.querySelector("."+css);
+    if (select) select.addEventListener("change", e => { manual(card,action,Number(e.target.value)); render(card,card.data); });
+  }
 }
 function createCard(data) {
   const el = document.querySelector("#room-template").content.firstElementChild.cloneNode(true);
   el.dataset.id = data.id;
   const card = {el,data,epoch:0,busy:false,error:""};
+  if (nativeOffice) {
+    const selects = document.querySelector("#detail-template").content.querySelector(".selects").cloneNode(true);
+    el.querySelector(".power").after(selects);
+    const lastRead = document.createElement("p"); lastRead.className = "last-read small muted"; el.append(lastRead);
+    const recover = document.createElement("button"); recover.className = "native-recover"; recover.textContent = "Revisar estado · sin repetir órdenes"; recover.hidden = true;
+    recover.addEventListener("click", () => confirmAction(card,"Revisar estado observado","Solo se leerá el estado. La revisión no confirma la orden anterior ni evita una cuarentena pendiente.","review-outcome",{}));
+    el.append(recover);
+  }
   bindControls(el,card);
   el.querySelector(".details").addEventListener("click", () => openDetail(card));
   rooms.append(el); cards.set(data.id,card);
@@ -134,8 +181,6 @@ function openDetail(card) {
   const el = document.querySelector("#detail-template").content.firstElementChild.cloneNode(true);
   document.querySelector("#detail-content").replaceChildren(el);
   detail = {el,card}; bindControls(el,card);
-  el.querySelector(".mode").addEventListener("change", e => mutate(card,"mode",{mode:Number(e.target.value)}));
-  el.querySelector(".fan").addEventListener("change", e => mutate(card,"fan",{speed:Number(e.target.value)}));
   el.querySelector(".history").addEventListener("click", () => history(card));
   render(card,card.data); document.querySelector("#detail-dialog").showModal();
 }
@@ -236,7 +281,7 @@ async function history(card) {
   const dialog = document.querySelector("#history-dialog");
   document.querySelector("#history-title").textContent = `Historial · ${card.data.name}`;
   document.querySelector("#history-rows").replaceChildren();
-  document.querySelector("#history-message").textContent = nativeReadonly ? "Cargando lecturas físicas…" : "Cargando muestras simuladas…";
+  document.querySelector("#history-message").textContent = nativeReadonly || nativeOffice ? "Cargando lecturas físicas…" : "Cargando muestras simuladas…";
   if (!dialog.open) dialog.showModal();
   try {
     const data = await api(`/api/controllers/${encodeURIComponent(card.data.id)}/history?limit=100`);
@@ -266,7 +311,13 @@ async function poll() {
   try {
     const session = await api("/api/session");
     token = session.token;
+    nativeOffice = session.mode === "native-office";
     nativeReadonly = session.mode === "native-readonly";
+    if (nativeOffice) {
+      document.querySelector(".demo-label").textContent = "Bluetooth · controles manuales";
+      document.querySelector('[data-view="lab"]').hidden = true;
+      document.querySelector("#view-admin .small.muted").textContent = "Administración autenticada. Protección automática y encendido automático deshabilitados.";
+    }
     if (nativeReadonly) {
       document.querySelector(".demo-label").textContent = "Bluetooth · solo lectura supervisada";
       document.querySelector("#native-admission").hidden = false;

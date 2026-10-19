@@ -1,0 +1,25 @@
+{
+  "rooms": {
+    "max_active_devices": 6,
+    "max_concurrent_operations": 1,
+    "stagger_seconds": 1.0,
+    "stale_seconds": 180.0,
+    "devices": [
+      {"id": "room-1", "name": "Sala 1", "address": "00000000-0000-4000-8000-000000000001"},
+      {"id": "room-2", "name": "Sala 2", "address": "00000000-0000-4000-8000-000000000002"},
+      {"id": "room-3", "name": "Sala 3", "address": "00000000-0000-4000-8000-000000000003"},
+      {"id": "room-4", "name": "Sala 4", "address": "00000000-0000-4000-8000-000000000004"},
+      {"id": "room-5", "name": "Sala 5", "address": "00000000-0000-4000-8000-000000000005"},
+      {"id": "room-6", "name": "Sala 6", "address": "00000000-0000-4000-8000-000000000006"}
+    ]
+  },
+  "controls": {
+    "room-1": {}, "room-2": {}, "room-3": {},
+    "room-4": {}, "room-5": {}, "room-6": {}
+  },
+  "host": "127.0.0.1",
+  "port": 8443,
+  "authorities": ["localhost:8443", "127.0.0.1:8443"],
+  "certificate": "/ABSOLUTE/PRIVATE/office-certificate.pem",
+  "private_key": "/ABSOLUTE/PRIVATE/office-key.pem"
+}
