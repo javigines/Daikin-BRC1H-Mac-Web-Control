@@ -162,6 +162,13 @@ Local consent and cancellation checks, with zero JavaScript errors. The existing
 Starlette/httpx deprecation warning remains. Hosted CI is reported separately on
 the PR so local results cannot be mistaken for a hosted or physical run.
 
+The first hosted run exposed an existing deadline-test race on Python 3.14:
+a 10ms whole-operation timeout expired before journaling, whereas the test
+expected a timeout after the SET effect. That fixture now captures the real
+asyncio timeout and reschedules its deadline at the first post-SET GET, asserting
+the pending ledger row and single applied SET before expiration. Production
+deadlines, power behavior and transport logic are unchanged.
+
 Offline PASS proves software contracts. It does not establish coordinated BLE
 acceptance, firmware support in another mode or controller, or physical safety
 outside the commissioned transition.

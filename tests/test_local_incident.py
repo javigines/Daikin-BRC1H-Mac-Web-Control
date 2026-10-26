@@ -228,15 +228,32 @@ def test_shutdown_quarantines_record_shutdown_cause_without_claiming_six_link_dr
     asyncio.run(case())
 
 
-@pytest.mark.parametrize('execution_budget,confirmed', [(.01, False), (.2, True)])
-def test_full_manual_deadline_can_expire_after_effect_before_complete_readback(local, execution_budget, confirmed):
+@pytest.mark.parametrize('confirmed', [False, True])
+def test_full_manual_deadline_can_expire_after_effect_before_complete_readback(local, monkeypatch, confirmed):
     async def case():
         manager = await manager_for(local)
         backend = manager.room('room-4').backend
-        # Scale wall time only: the SET finishes before five delayed GETs.
-        # A short whole-operation budget yields uncertainty despite the effect.
-        backend.manual_timeout = execution_budget
-        local.stage, local.room, local.delay = 'readback', 'room-4', .005
+        # Capture the real whole-operation timeout, then expire it at the first
+        # post-SET GET. A 10ms wall clock could expire during baseline/fsync on
+        # CI and never exercise the intended after-effect uncertainty boundary.
+        backend.manual_timeout = 73
+        original_timeout, deadline = asyncio.timeout, None
+        def capture_timeout(delay):
+            nonlocal deadline
+            context = original_timeout(delay)
+            if delay == backend.manual_timeout:
+                assert deadline is None
+                deadline = context
+            return context
+        monkeypatch.setattr(asyncio, 'timeout', capture_timeout)
+        def reply(room, command, objects, wrote):
+            if room == 'room-4' and command == CMD_GET_POWER and wrote and not confirmed:
+                assert local.budget.last_operation(room)['status'] == 'pending'
+                assert local.states[room][CMD_GET_POWER][0x20] == b'\x00'
+                assert len(sets(local)) == 1 and deadline is not None
+                deadline.reschedule(asyncio.get_running_loop().time())
+            return objects
+        local.reply_hook = reply
         if confirmed:
             result = await manager.native_manual('room-4', 'power', False, str(uuid4()), 'Local browser action')
             assert result['last_operation']['status'] == 'confirmed'
@@ -244,9 +261,10 @@ def test_full_manual_deadline_can_expire_after_effect_before_complete_readback(l
             with pytest.raises(RoomUnavailable):
                 await manager.native_manual('room-4', 'power', False, str(uuid4()), 'Local browser action')
             assert local.budget.last_operation('room-4')['status'] == 'uncertain'
+        assert deadline is not None and deadline.expired() is not confirmed
         assert local.states['room-4'][CMD_GET_POWER][0x20] == b'\x00'
         assert len(sets(local)) == 1
-        local.delay = 0
+        local.reply_hook = None
         await manager.close(); manager.store.close()
     asyncio.run(case())
 
