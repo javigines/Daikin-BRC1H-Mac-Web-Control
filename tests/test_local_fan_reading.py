@@ -199,7 +199,8 @@ def test_uncertain_stays_blocked_on_poll_and_review_is_get_only(tmp_path):
                 with pytest.raises(RoomUnavailable):
                     await manager.native_manual('room-1', 'fan', 5, str(uuid4()), 'Synthetic blocked write')
                 reviewed = await manager.native_recover('room-1', 'Synthetic GET-only review')
-                assert reviewed['last_operation']['status'] == 'reviewed_uncertain'
+                assert reviewed['last_operation']['status'] == 'uncertain'
+                assert local.budget.pending_operation('room-1')
                 assert reviewed['state']['fan_id'] == 0 and not reviewed['manual_controls']['fans']
                 assert not sets(local)
             finally:

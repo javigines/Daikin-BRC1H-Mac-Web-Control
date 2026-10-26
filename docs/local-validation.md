@@ -81,11 +81,13 @@ implementation review, not a claim of independent physical verification.
   without configured fan write choices; Auto=0 is display-only. An inactive
   manual speed outside the enabled write subset remains a valid observation.
   Missing/unknown banks retain separate field status and do not hide the other
-  bank or room temperature. Raw extensions are preserved. The previous pair of
-  one-byte 1–5 values is still required for fan writes, including fresh preflight;
-  this correction grants no new SET permission. Modes and
-  speeds beyond current observations require the simple local wall-supported
-  choices; enum membership is not firmware evidence.
+  bank or room temperature. Raw extensions are preserved. Legacy rooms retain
+  the pair of one-byte 1–5 values for fan writes. Explicit per-room/mode fan
+  policies admit complete 0–5 pairs, preserve inactive Auto and expose only
+  owner-confirmed manual steps; enum membership is not firmware evidence.
+  See [fan write validation and pending physical pilot](local-fan-writing.md).
+  An unknown ACK, no effect or preservation failure leaves durable uncertainty;
+  GET-only review never rearms fan writes.
 - The existing private inventory is read unchanged; obsolete TLS fields do not
   affect local startup. Settings are atomic owner-only sidecar writes, scoped by
   identity digest, and survive restart. Unique temporary names avoid a stale

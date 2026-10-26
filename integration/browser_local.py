@@ -42,6 +42,7 @@ def serve(directory):
         mode_fault = {"unknown_ack": False}
         def reply(room, command, objects, wrote):
             if command == CMD_SET_POWER: return {0x20: b'\x00'}
+            if command == CMD_SET_FAN: return {0x20: b'\x00', 0x21: b'\x00'}
             if command == CMD_SET_SETPOINT:
                 setpoint_rooms.add(room)
                 return synthetic_setpoint_ack()
@@ -110,7 +111,11 @@ def serve(directory):
             return {"sets": [(c[0], c[1]) for c in local.calls if len(c) == 3 and
                              c[1] in (CMD_SET_POWER, CMD_SET_MODE, CMD_SET_SETPOINT, CMD_SET_FAN)],
                     "retained": {room: backend.raw.get(CMD_GET_FAN) == local.states[room][CMD_GET_FAN]
-                                 for room, backend in local.fleet.backends.items()}}
+                                 for room, backend in local.fleet.backends.items()},
+                    "fan_sets": [(c[0], {str(k): v.hex() for k, v in c[2].items()})
+                                 for c in local.calls if len(c) == 3 and c[1] == CMD_SET_FAN],
+                    "blocks": {room: {str(k): v.hex() for k, v in state[CMD_GET_FAN].items()}
+                               for room, state in local.states.items()}}
         @app.get("/__closed/mode-fixture/{scenario}")
         async def mode_fixture(scenario: str):
             assert scenario in ('reset', 'unknown-ack', 'expired', 'persistent-old')
