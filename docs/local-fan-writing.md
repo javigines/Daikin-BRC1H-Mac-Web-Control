@@ -1,8 +1,9 @@
 # Local fan writes with commissioned Auto/manual banks (issue #18)
 
-Base: `master` `2cd1e97f157166b78eca355b167eb3b36b57be56` (PR #17).
+Original base: `master` `2cd1e97f157166b78eca355b167eb3b36b57be56` (PR #17).
+Integrated base: `dfc0014b5c5dbed311414027ad23a37e34805bfc` (merged PRs #21/#22).
 This implements the Local runtime and UI, independent of research draft #16,
-temperature work and Modes #19. It does not certify physical effect. No real
+and preserves the merged mode and coordinated-setpoint contracts. It does not certify physical effect. No real
 Bluetooth, Mac mini, private configuration/SQLite, SET, merge or deployment is
 used to develop or validate this change. All published fixtures are invented.
 
@@ -112,6 +113,11 @@ fields; exact SET args; journal/intent before SET; unknown ACK even with exact
 GET; no effect and side effects; transport/correlation failures; persistent STOP
 after review/restart; no-op; and six-room permission/state/failure isolation.
 The previous fan-reading regression suite remains, including legacy rooms.
+`tests/test_local_fan_modes_setpoint_coexistence.py` adds 14 synthetic cases for
+separate authority persistence, one SET per action, room isolation, stale
+coordinated consent after fan/mode/permission changes and action-specific
+uncertainty/review semantics. Fan and Local mode uncertainty stay durable;
+the existing temperature review behavior is preserved.
 
 The actual Local HTTP/SQLite/closed-SDK Chromium harness exercises card/detail
 observations, permission hints, commissioning, manual/Auto and Auto/manual writes

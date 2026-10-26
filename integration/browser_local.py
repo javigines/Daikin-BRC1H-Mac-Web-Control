@@ -76,7 +76,9 @@ def serve(directory):
                 if scenario == 'coexistence':
                     from madoka_multiroom.local_modes import LocalControls
                     now = time.time()
+                    local.states[room][CMD_GET_FAN] = {0x20:b'\x03',0x21:b'\x00'}
                     backend.controls = LocalControls(power=True,setpoint=True,modes=(0,1,3,4),fans=(1,3,5),
+                        fan_policy=dict(cooling_steps=[1,5],heating_steps=[3,5]),
                         mode_commissioning=dict(wall_modes=[0,1,3,4],checked_at=now-1,expires_at=now+3600,
                             restrictions='unlocked',physical_scope='independent'))
                     mode_fault['unknown_ack'] = False
@@ -302,6 +304,70 @@ def main():
                     evidence = page.request.get(BASE+"/__closed/fan-evidence").json()
                     assert evidence['sets'] == fan_baseline and all(evidence['retained'].values())
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                # Commission only independently confirmed synthetic steps in
+                # this room/mode. Saving and opening controls never writes.
+                assert page.request.get(BASE+'/__closed/fan-fixture/cool').ok
+                page.reload()
+                write_baseline = page.request.get(BASE+'/__closed/fan-evidence').json()
+                def commission_fan(i, steps):
+                    card(i).locator('.local-configure').click()
+                    dialog = page.locator('#local-controls-dialog')
+                    for check in dialog.locator('input[name="fans"]').all(): check.uncheck()
+                    dialog.locator('input[name="fan_policy_enabled"]').check()
+                    for speed in steps: dialog.locator(f'input[name="fan_cooling_steps"][value="{speed}"]').check()
+                    dialog.get_by_role('button',name='Guardar controles').click()
+                    expect(card(i).locator('.fan')).to_be_enabled()
+                for viewport, i, value, inactive in [({'width':1440,'height':1100},2,'1','00'),
+                                                   ({'width':390,'height':844},5,'5','02')]:
+                    page.set_viewport_size(viewport)
+                    expect(card(i).locator('.fan')).to_be_disabled()
+                    expect(card(i).locator('.fan-permission')).to_contain_text('sin permiso')
+                    commission_fan(i, (1,5))
+                    assert page.request.get(BASE+'/__closed/fan-evidence').json()['fan_sets'] == write_baseline['fan_sets']
+                    expect(card(i).locator('.fan option[value="2"]')).to_have_js_property('hidden',True)
+                    expect(card(i).locator('.fan option[value="0"]')).to_have_js_property('disabled',True)
+                    card(i).locator('.details').click()
+                    fan = page.locator('#detail-content .fan')
+                    expect(fan).to_be_enabled()
+                    fan.select_option(value)
+                    expect(card(i).locator('.fan')).to_have_value(value)
+                    expect(card(i).locator('.operation-status')).to_have_text('Cambio confirmado')
+                    page.locator('#close-detail').click()
+                    write_baseline = page.request.get(BASE+'/__closed/fan-evidence').json()
+                    assert write_baseline['fan_sets'][-1] == [f'room-{i}', {'32': f'0{value}', '33':inactive}]
+                    assert len(write_baseline['blocks'][f'room-{i}']) == 6  # GET extras were preserved.
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                # API rejects a request bound to an older mode before SET.
+                token = page.request.get(BASE+'/api/session').json()['token']
+                response = page.request.post(BASE+'/api/controllers/room-5/manual',
+                    headers={'X-Demo-Token':token,'Origin':BASE},
+                    data={'operation_id':str(uuid4()),'action':'fan','value':1,'expected_mode':4})
+                assert response.status == 422
+                assert page.request.get(BASE+'/__closed/fan-evidence').json()['fan_sets'] == write_baseline['fan_sets']
+                # No-effect fan remains uncertain after GET-only UI review;
+                # another room's fan remains usable and no SET is replayed.
+                commission_fan(3, (1,5))
+                card(3).locator('.fan').select_option('1')
+                expect(card(3).locator('.operation-status')).to_contain_text('No se pudo confirmar')
+                expect(card(3).locator('.fan')).to_be_disabled()
+                failed = page.request.get(BASE+'/__closed/fan-evidence').json()['fan_sets']
+                card(3).locator('.native-recover').click()
+                expect(card(3).locator('.operation-status')).to_contain_text('No se pudo confirmar')
+                expect(card(3).locator('.fan')).to_be_disabled()
+                expect(card(5).locator('.fan')).to_be_enabled()
+                page.reload()
+                expect(card(2).locator('.fan')).to_be_enabled()
+                expect(card(3).locator('.fan')).to_be_disabled()
+                assert page.request.get(BASE+'/__closed/fan-evidence').json()['fan_sets'] == failed
+                # Disabling a per-mode grant must revoke fan access, rather
+                # than promoting those steps to a general legacy permission.
+                card(5).locator('.local-configure').click()
+                page.locator('#local-controls-dialog input[name="fan_policy_enabled"]').uncheck()
+                page.locator('#local-controls-dialog').get_by_role('button',name='Guardar controles').click()
+                expect(card(5).locator('.fan')).to_be_disabled()
+                revoked = page.request.get(BASE+'/api/controllers/room-5').json()['local_controls']
+                assert revoked['fan_policy'] is None and revoked['fans'] == []
+                assert page.request.get(BASE+'/__closed/fan-evidence').json()['fan_sets'] == failed
                 # Commission Fan/Dry via the product UI; ventilation absent is
                 # independent. Exercise derived target changes and durable STOP.
                 assert page.request.get(BASE+'/__closed/mode-fixture/reset').ok
@@ -474,6 +540,20 @@ def main():
                     page.reload()
                     expect(card(5).locator('.setpoint')).to_have_text('26°')
                     before = page.request.get(BASE+'/__closed/setpoint-evidence').json()
+                    controls_before = page.request.get(BASE+'/api/controllers/room-5').json()['local_controls']
+                    no_sets = page.request.get(BASE+'/__closed/fan-evidence').json()['sets']
+                    card(5).locator('.local-configure').click()
+                    settings_dialog = page.locator('#local-controls-dialog')
+                    expect(settings_dialog.locator('[name="fan_policy_enabled"]')).to_be_checked()
+                    settings_dialog.get_by_role('button',name='Guardar controles').click()
+                    controls_after = page.request.get(BASE+'/api/controllers/room-5').json()['local_controls']
+                    assert controls_after == controls_before
+                    assert page.request.get(BASE+'/__closed/fan-evidence').json()['sets'] == no_sets
+                    card(5).locator('.fan').select_option('5')
+                    expect(card(5).locator('.operation-status')).to_have_text('Cambio confirmado')
+                    assert page.request.get(BASE+'/__closed/setpoint-evidence').json() == before
+                    banks = page.request.get(BASE+'/__closed/fan-evidence').json()['blocks']['room-5']
+                    assert banks == {'32':'05','33':'00'}
                     card(5).locator('.decrease').click()
                     expect(dialog).to_be_visible()
                     assert page.request.get(BASE+'/__closed/coordinated-fixture/external-dry').ok
@@ -501,7 +581,7 @@ def main():
                 assert errors==[],errors
                 browser.close()
         finally: stop()
-        print("PASS Chromium local HTTP: six synthetic setpoint/fan structures, independent Cool/Heat banks and Auto display without new writes, unknown/missing fields, raw extensions, strict GET, Fan/Dry and conditional Ventilation commissioning/controls, durable mode STOP, coordinated-pair consent/cancel/stale rejection, single SET and byte isolation, capability settings, uncertain without replay, history/restart, desktop/mobile; 0 JS errors; real drivers forbidden")
+        print("PASS Chromium local HTTP: six synthetic setpoint/fan structures, independent Cool/Heat banks and Auto display without new writes, unknown/missing fields, raw extensions, strict GET, fan commissioning/revocation and manual/Auto/Auto-manual writes, durable fan STOP after review/reload, Fan/Dry and conditional Ventilation commissioning/controls, durable mode STOP, coordinated-pair consent/cancel/stale rejection, single SET and byte isolation, capability settings, uncertain without replay, history/restart, desktop/mobile; 0 JS errors; real drivers forbidden")
 
 
 if __name__=="__main__":

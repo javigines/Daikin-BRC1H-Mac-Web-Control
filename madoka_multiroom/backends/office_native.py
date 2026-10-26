@@ -546,6 +546,8 @@ class OfficeBackend(PreparedDaikinBackend):
                                 raise ValueError("Fan mode changed during baseline")
                             setpoint_fields(raw[CMD_GET_SETPOINT])
                             self.validate_action(action, value)
+                            if self.budget.pending_operation(self.room_id):
+                                raise ValueError("Unresolved write appeared during fan baseline")
                         if action == "mode":
                             if before["mode_id"] != presented_mode:
                                 raise ValueError("Mode changed since presentation")
@@ -614,6 +616,8 @@ class OfficeBackend(PreparedDaikinBackend):
                     if (action == "mode" and getattr(self.budget, "local", False)
                             and getattr(self.controls, "mode_commissioning", None) is not None):
                         schema = mode_ack_schema(ack, require_status=True)
+                    elif action == "fan":
+                        schema = fan_ack_schema(ack, commissioned=commissioned_fan)
                     else:
                         schema = validate_set_ack(command, ack)
                 except UnknownSetpointAck as exc:
