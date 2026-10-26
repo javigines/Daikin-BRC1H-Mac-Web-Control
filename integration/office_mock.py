@@ -21,6 +21,19 @@ from madoka_multiroom.backends.office_native import OfficeFleet
 SHA = "02fa53c7773e4a551158165cab5f246a0d19b03a"
 
 
+def synthetic_setpoint_block(*, extended=False):
+    """Invented protocol fixture only; never derived from an installation."""
+    block = {0x20: temp_to_bytes(22), 0x21: temp_to_bytes(21),
+             **{k: value.to_bytes(size, "big") for k, size, value in SETPOINT_EXTRA_FIELDS}}
+    block.update({k: temp_to_bytes(16) for k in (0xA2, 0xA3)})
+    block.update({k: temp_to_bytes(32) for k in (0xB2, 0xB3)})
+    if extended:
+        block.update({0x30: b'\x01', 0x32: b'\x03', 0xA0: b'\x10', 0xA1: b'\x0f',
+                      0xB0: b'\x20', 0xB1: b'\x1f', 0xA4: b'\x02', 0xA5: b'\x03',
+                      0xB4: b'\x04', 0xB5: b'\xff', 0x99: b'\x0a\x01', 0x9A: b'\x07'})
+    return block
+
+
 @contextmanager
 def closed_office(directory, *, concurrency=2, port=8443, local=False):
     directory = Path(directory)
@@ -44,10 +57,7 @@ def closed_office(directory, *, concurrency=2, port=8443, local=False):
     options.mute_reply_for = set()
     options.disconnect_after_set = False
     for d in config.rooms.devices:
-        block = {0x20: temp_to_bytes(22), 0x21: temp_to_bytes(21),
-                 **{k: value.to_bytes(size, "big") for k, size, value in SETPOINT_EXTRA_FIELDS}}
-        block.update({k: temp_to_bytes(16) for k in (0xA2, 0xA3)})
-        block.update({k: temp_to_bytes(32) for k in (0xB2, 0xB3)})
+        block = synthetic_setpoint_block()
         options.states[d.id] = {CMD_GET_POWER: {0x20: b"\x01"}, CMD_GET_MODE: {0x20: b"\x03"},
             CMD_GET_SETPOINT: block, CMD_GET_FAN: {0x20: b"\x03", 0x21: b"\x02"}, CMD_GET_SENSOR: {0x40: b"\x17"}}
 

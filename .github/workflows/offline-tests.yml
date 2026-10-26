@@ -50,10 +50,3 @@ jobs:
           python integration/browser_native_readonly.py
           python integration/browser_office.py
           python integration/browser_local.py
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: offline-chromium-evidence
-          path: |
-            artifacts/*.png
-            docs/images/*.png
