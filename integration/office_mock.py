@@ -34,6 +34,12 @@ def synthetic_setpoint_block(*, extended=False):
     return block
 
 
+def synthetic_setpoint_ack():
+    """Invented compact response; bytes are deliberately not GET observations."""
+    return {oid: bytes([(index * 17 + 5) % 256])
+            for index, oid in enumerate(synthetic_setpoint_block())}
+
+
 @contextmanager
 def closed_office(directory, *, concurrency=2, port=8443, local=False):
     directory = Path(directory)
@@ -53,6 +59,7 @@ def closed_office(directory, *, concurrency=2, port=8443, local=False):
     options.external_connections = set()
     options.native_overrides = {}
     options.reply_hook = None
+    options.raw_replies = {}  # Synthetic malformed/correlation fixtures only.
     options.exchange_delay = 0
     options.mute_reply_for = set()
     options.disconnect_after_set = False
@@ -158,6 +165,7 @@ def closed_office(directory, *, concurrency=2, port=8443, local=False):
                 return
             body = b"".join(bytes((k, len(v))) + v for k, v in objects.items())
             answer = bytes((4 + len(body), 0)) + command.to_bytes(2, "big") + body
+            answer = options.raw_replies.get(command, answer)
             for chunk in split_in_chunks(bytearray(answer)):
                 self.notify(None, chunk)
         async def stop_notify(self, char):

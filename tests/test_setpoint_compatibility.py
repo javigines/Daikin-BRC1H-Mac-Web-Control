@@ -206,7 +206,7 @@ def test_recognized_ack_never_confirms_effect_without_get(tmp_path, ack):
         asyncio.run(case())
 
 
-@pytest.mark.parametrize('fault', ['partial', 'status_byte', 'unknown', 'extra', 'width', 'flags'])
+@pytest.mark.parametrize('fault', ['partial', 'status_byte', 'unknown', 'extra', 'width', 'zero_length'])
 def test_unknown_ack_remains_uncertain_even_when_effect_applied(tmp_path, fault):
     ack = synthetic_setpoint_block()
     if fault == 'partial': ack.pop(0x32)
@@ -214,7 +214,7 @@ def test_unknown_ack_remains_uncertain_even_when_effect_applied(tmp_path, fault)
     if fault == 'unknown': ack = {0xFF: b'\x01'}
     if fault == 'extra': ack[0x99] = b'\x01'
     if fault == 'width': ack[0x21] = b'\x01'
-    if fault == 'flags': ack[0x30] = b'\xff'
+    if fault == 'zero_length': ack[0x30] = b''
     with pytest.raises(WriteNotConfirmed): validate_set_ack(CMD_SET_SETPOINT, ack)
     with closed_office(tmp_path, local=True) as local:
         async def case():

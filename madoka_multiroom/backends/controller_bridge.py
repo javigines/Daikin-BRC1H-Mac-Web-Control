@@ -227,7 +227,7 @@ class HardenedControllerBridge(Controller):
                 return
             command = cmd_id_of(payload)
             if hasattr(self, 'last_exchange'):
-                self.last_exchange['reply_hex'] = bytes(payload).hex()
+                self.last_exchange['reply_size'] = len(payload)
             if payload[1] != 0 or command not in self.pending or self.pending[command].done():
                 raise ValueError("Unexpected response")
             parse_objects(payload)
