@@ -154,7 +154,7 @@ def test_local_settings_persist_without_changing_private_office_config(local,tmp
         local.fleet.configure_controls('room-1',controls)
         assert local.fleet.settings_path.stat().st_mode & 0o077 == 0
         replacement=LocalFleet(local.config,local.budget,local.grants,settings_path=local.fleet.settings_path)
-        assert replacement.backends['room-1'].controls==controls
+        assert replacement.backends['room-1'].controls.model_dump(exclude={'mode_commissioning'})==controls.model_dump()
         backend=await replacement.ensure_room('room-1')
         await backend.snapshot(('power','mode','setpoint','sensor','fan'))
         assert backend.latest['min_setpoint']==20 and backend.latest['max_setpoint']==25

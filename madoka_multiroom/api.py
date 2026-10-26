@@ -49,6 +49,7 @@ class LocalManualBody(StrictModel):
     operation_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
     action: Literal["power", "setpoint", "mode", "fan"]
     value: bool | int | float
+    expected_mode: int | None = Field(default=None, strict=True, ge=0, le=5)
     setpoint_confirmation: SetpointConfirmation | None = None
 
 
@@ -351,14 +352,16 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None, off
         return await mutate(request, controller_id, "fan", body.speed)
 
     if local:
-        from .office_access import Controls
+        from .local_modes import LocalControls
 
         @app.post("/api/controllers/{controller_id}/manual")
         async def local_manual(request: Request, controller_id: str, body: LocalManualBody):
             try:
+                if body.action == "mode" and body.value in (0, 1, 5) and body.expected_mode is None:
+                    raise ValueError("Expected current mode required")
                 return await lookup(request, controller_id).native_manual(controller_id,
                     body.action, body.value, body.operation_id, "Local browser action",
-                    setpoint_confirmation=body.setpoint_confirmation)
+                    expected_mode=body.expected_mode, setpoint_confirmation=body.setpoint_confirmation)
             except ValueError:
                 raise HTTPException(422, "Este control o valor no está disponible en este Daikin") from None
 
@@ -367,13 +370,16 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None, off
             return await lookup(request, controller_id).native_recover(controller_id, "User requested current observations")
 
         @app.post("/api/controllers/{controller_id}/local-controls")
-        async def local_controls(request: Request, controller_id: str, body: Controls):
+        async def local_controls(request: Request, controller_id: str, body: LocalControls):
             manager = lookup(request, controller_id)
             room = manager.room(controller_id)
             if room.lock.locked():
                 raise RoomBusy()
             async with room.lock:
-                offline_fleet.configure_controls(controller_id, body)
+                try:
+                    offline_fleet.configure_controls(controller_id, body)
+                except ValueError:
+                    raise HTTPException(422, "Revisa las capacidades y el inventario de esta sala") from None
             return manager.snapshot(controller_id)
     else:
         @app.post("/api/controllers/{controller_id}/manual")

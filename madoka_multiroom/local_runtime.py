@@ -12,10 +12,11 @@ import sys
 import time
 from importlib.metadata import version
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from .config import AppConfig, StrictModel
 from .coordinated_setpoint import CoordinatedSetpointProfile
 from .office_access import Controls, read_private
+from .local_modes import LocalControls
 from .native_access import native_state_directory
 from .backends.base import BackendUnavailable
 from .backends.office_native import OfficeFleet
@@ -31,8 +32,16 @@ class LocalSession:
 
 class LocalConfig(StrictModel):
     rooms: AppConfig
-    controls: dict[str, Controls]
+    controls: dict[str, LocalControls]
     coordinated_setpoints: dict[str, CoordinatedSetpointProfile] = Field(default_factory=dict)
+
+    @field_validator("controls", mode="before")
+    @classmethod
+    def legacy_controls(cls, value):
+        if isinstance(value, dict):
+            return {room: control.model_dump() if isinstance(control, Controls) else control
+                    for room, control in value.items()}
+        return value
 
     @model_validator(mode="after")
     def scope(self):
@@ -66,7 +75,7 @@ def load_local_config(path):
     if not isinstance(data, dict) or set(data) - allowed:
         raise ValueError("Formato de configuración local desconocido")
     rooms = AppConfig.model_validate(data["rooms"])
-    controls = {d.id: Controls.model_validate(data.get("controls", {}).get(d.id, {})) for d in rooms.devices}
+    controls = {d.id: LocalControls.model_validate(data.get("controls", {}).get(d.id, {})) for d in rooms.devices}
     return LocalConfig(rooms=rooms, controls=controls,
         coordinated_setpoints=data.get("coordinated_setpoints", {}))
 
@@ -153,10 +162,27 @@ class LocalFleet(OfficeFleet):
                 digest = hashlib.sha256(self.sessions[room].identity.encode()).hexdigest()
                 if saved.get("identity") != digest:
                     raise ValueError("Los ajustes pertenecen a otro controlador")
-                self.backends[room].controls = Controls.model_validate(saved["controls"])
+                self.backends[room].controls = LocalControls.model_validate(saved["controls"])
                 self.backends[room].local_configured = True
 
     def configure_controls(self, room_id, controls):
+        controls = LocalControls.model_validate(controls.model_dump())
+        evidence = controls.mode_commissioning
+        current = self.backends[room_id].controls
+        previous = getattr(current, "mode_commissioning", None)
+        if previous and previous.blocked() and (evidence is None or not evidence.blocked()):
+            if (evidence is None or evidence.checked_at <= previous.checked_at
+                    or evidence.checked_at > time.time() or evidence.restrictions != "unlocked"
+                    or evidence.physical_scope != "independent"):
+                raise ValueError("Una restricción conocida requiere nueva verificación explícita; no borrar evidencia")
+        added_extra = (set(controls.modes) - set(current.modes)) & {0, 1, 5}
+        changed_evidence = evidence != previous
+        if evidence and (added_extra or changed_evidence):
+            # A restriction/revocation must be persistable, even with retained
+            # disabled modes. It never grants additional authority or rearms STOP.
+            restrictive = evidence.blocked() and not added_extra
+            if not restrictive and any(not evidence.permits(mode) for mode in set(controls.modes) & {0, 1, 5}):
+                raise ValueError("Revisa la autorización de modos adicionales; caducada, revocada o sin verificar")
         if not self.settings_path:
             raise ValueError("No se pueden guardar los ajustes locales")
         data = {"schema": 1, "rooms": {room: {

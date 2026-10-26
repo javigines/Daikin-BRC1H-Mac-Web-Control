@@ -30,6 +30,11 @@ function protectionText(p) {
 }
 function updateControls(root, card) {
   const data = card.data, state = data.state || {}, stale = isStale(data);
+  if (localMode) {
+    let notice = root.querySelector(".mode-notice");
+    if (!notice) { notice = document.createElement("p"); notice.className = "mode-notice small muted"; root.querySelector(".power").after(notice); }
+    notice.textContent = state.mode_notice || "";
+  }
   root.querySelector(".room-temp").textContent = stale ? "—" : (state.room_temp ?? "—");
   root.querySelector(".setpoint").textContent = stale || state.setpoint == null ? "—" : `${state.setpoint}°`;
   const connection = root.querySelector(".connection");
@@ -117,7 +122,7 @@ function render(card, data) {
       diagnostics.querySelector("pre").textContent = JSON.stringify(data.last_operation?.diagnostics || data.diagnostic || [], null, 2);
       let targets = detail.el.querySelector(".local-targets");
       if (!targets) { targets = document.createElement("p"); targets.className = "local-targets muted"; detail.el.querySelector(".updated").before(targets); }
-      targets.textContent = `Objetivo en frío: ${data.state.cooling_setpoint ?? "—"} °C · en calor: ${data.state.heating_setpoint ?? "—"} °C`;
+      targets.textContent = `Objetivos guardados · frío: ${data.state.cooling_setpoint ?? "—"} °C · calor: ${data.state.heating_setpoint ?? "—"} °C. Activo: ${data.state.setpoint ?? "no aplicable"}`;
     }
   }
   if (admin?.card === card) renderAdmin(admin);
@@ -175,7 +180,8 @@ function manual(card,action,value) {
       document.querySelector("#cancel-setpoint-confirm").focus();
       return;
     }
-    return mutate(card,"manual",{operation_id:crypto.randomUUID(),action,value});
+    return mutate(card,"manual",{operation_id:crypto.randomUUID(),action,value,
+      ...(action === "mode" ? {expected_mode:card.data.state.mode_id} : {})});
   }
   if (!nativeOffice) return mutate(card,action,action === "power" ? {on:value} : action === "setpoint" ? {temp:value} : action === "mode" ? {mode:value} : {speed:value});
   confirmAction(card,"Confirmar cambio físico",`Se enviará una sola orden (${names[action] || action}: ${value}). Se guardará el estado anterior y se verificará con GET. No se repetirá automáticamente.`,"manual",{operation_id:crypto.randomUUID(),action,value});
@@ -228,13 +234,34 @@ function localSettings(card) {
   for (const key of ["power","setpoint"]) dialog.querySelector(`[name="${key}"]`).checked = controls[key];
   for (const key of ["modes","fans"]) for (const input of dialog.querySelectorAll(`[name="${key}"]`)) input.checked = controls[key].includes(Number(input.value));
   for (const key of ["minimum","maximum"]) dialog.querySelector(`[name="${key}"]`).value = controls[key];
+  const evidence = controls.mode_commissioning;
+  for (const key of ["restrictions","physical_scope","dry_fan_effect"]) dialog.querySelector(`[name="${key}"]`).value = evidence?.[key] || (key === "dry_fan_effect" ? "preserve" : "unknown");
+  dialog.querySelector('[name="ventilation_hardware"]').checked = evidence?.ventilation_hardware || false;
+  dialog.querySelector('[name="mode_revoked"]').checked = evidence?.revoked || false;
+  dialog.querySelector('[name="wall_verified"]').checked = false;
   dialog.querySelector("form").onsubmit = e => {
     e.preventDefault();
     if (!e.target.reportValidity()) return;
-    const patch = {};
+    const patch = {...controls};
     for (const key of ["power","setpoint"]) patch[key] = dialog.querySelector(`[name="${key}"]`).checked;
     for (const key of ["modes","fans"]) patch[key] = [...dialog.querySelectorAll(`[name="${key}"]:checked`)].map(input => Number(input.value));
     for (const key of ["minimum","maximum"]) patch[key] = Number(dialog.querySelector(`[name="${key}"]`).value);
+    if (dialog.querySelector('[name="wall_verified"]').checked) {
+      const now = Date.now()/1000;
+      patch.mode_commissioning = {wall_modes:patch.modes, checked_at:now, expires_at:null,
+        revoked:dialog.querySelector('[name="mode_revoked"]').checked,
+        ventilation_hardware:dialog.querySelector('[name="ventilation_hardware"]').checked};
+      for (const key of ["restrictions","physical_scope","dry_fan_effect"]) patch.mode_commissioning[key] = dialog.querySelector(`[name="${key}"]`).value;
+    } else if (evidence) {
+      // Editing another control never refreshes or erases wall commissioning.
+      patch.mode_commissioning = evidence;
+      // Revocation can always be recorded without a new wall inspection. Only
+      // explicit renewed inspection may remove it; unrelated edits retain it.
+      if (dialog.querySelector('[name="mode_revoked"]').checked) patch.mode_commissioning = {...evidence, revoked:true};
+    } else if (dialog.querySelector('[name="mode_revoked"]').checked) {
+      // A legacy-only room may record a block without inventing wall inventory.
+      patch.mode_commissioning = {wall_modes:[], checked_at:Date.now()/1000, revoked:true};
+    }
     dialog.close(); mutate(card,"local-controls",patch);
   };
   dialog.querySelector(".close-local-controls").onclick = () => dialog.close();

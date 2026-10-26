@@ -38,10 +38,16 @@ def serve(directory):
         for state in local.states.values():
             state[CMD_GET_SETPOINT] = synthetic_setpoint_block(extended=True)
         local.states['room-6'][CMD_GET_POWER][0x20] = b'\x00'
+        setpoint_rooms = set()
+        mode_fault = {"unknown_ack": False}
         def reply(room, command, objects, wrote):
             if command == CMD_SET_POWER: return {0x20: b'\x00'}
-            if command == CMD_SET_SETPOINT: return synthetic_setpoint_ack()
-            if command == CMD_GET_SETPOINT and wrote: objects[0x9B] = b'\x08'
+            if command == CMD_SET_SETPOINT:
+                setpoint_rooms.add(room)
+                return synthetic_setpoint_ack()
+            if command == CMD_SET_MODE:
+                return {0x20: b'\xff' if mode_fault['unknown_ack'] else b'\x03'}
+            if command == CMD_GET_SETPOINT and room in setpoint_rooms: objects[0x9B] = b'\x08'
             return objects
         local.reply_hook = reply
         if not local.fleet.settings_path.exists():
@@ -58,14 +64,23 @@ def serve(directory):
                                for r, state in local.states.items()}}
         @app.get("/__closed/coordinated-fixture/{scenario}")
         async def coordinated_fixture(scenario: str):
-            assert scenario in ('baseline', 'stale')
+            assert scenario in ('baseline', 'stale', 'coexistence', 'external-dry')
             room = 'room-5'
-            if scenario == 'baseline':
+            if scenario in ('baseline', 'coexistence'):
                 local.states[room][CMD_GET_SETPOINT] = synthetic_coordinated_block()
                 local.states[room][CMD_GET_MODE][0x20] = b'\x03'
                 backend = local.fleet.backends[room]
                 backend.controls = Controls(power=True,setpoint=True)
                 backend.coordinated_setpoint_profile = synthetic_coordinated_profile(local.grants[room].identity)
+                if scenario == 'coexistence':
+                    from madoka_multiroom.local_modes import LocalControls
+                    now = time.time()
+                    backend.controls = LocalControls(power=True,setpoint=True,modes=(0,1,3,4),fans=(1,3,5),
+                        mode_commissioning=dict(wall_modes=[0,1,3,4],checked_at=now-1,expires_at=now+3600,
+                            restrictions='unlocked',physical_scope='independent'))
+                    mode_fault['unknown_ack'] = False
+            elif scenario == 'external-dry':
+                local.states[room][CMD_GET_MODE][0x20] = b'\x01'
             else:
                 local.states[room][CMD_GET_SETPOINT][0x99] = b'\x09'
             async with app.state.manager.room(room).lock:
@@ -96,6 +111,27 @@ def serve(directory):
                              c[1] in (CMD_SET_POWER, CMD_SET_MODE, CMD_SET_SETPOINT, CMD_SET_FAN)],
                     "retained": {room: backend.raw.get(CMD_GET_FAN) == local.states[room][CMD_GET_FAN]
                                  for room, backend in local.fleet.backends.items()}}
+        @app.get("/__closed/mode-fixture/{scenario}")
+        async def mode_fixture(scenario: str):
+            assert scenario in ('reset', 'unknown-ack', 'expired', 'persistent-old')
+            mode_fault['unknown_ack'] = scenario == 'unknown-ack'
+            if scenario in ('expired', 'persistent-old'):
+                from madoka_multiroom.local_modes import LocalControls
+                backend = local.fleet.backends['room-1']
+                data = backend.controls.model_dump()
+                data['mode_commissioning'].update(
+                    checked_at=time.time()-60*86400,
+                    expires_at=time.time()-3600 if scenario == 'expired' else None)
+                backend.controls = LocalControls.model_validate(data)
+                local.fleet.configure_controls('room-1', backend.controls)
+                await app.state.manager.operate('room-1')
+            if scenario == 'reset':
+                for room, state in local.states.items():
+                    state[CMD_GET_MODE] = {0x20:b'\x03'}
+                    state[CMD_GET_FAN] = {0x20:b'\x03', 0x21:b'\x02'}
+                    local.fleet.backends[room].controls = Controls(power=True, setpoint=True, modes=(2,3,4), fans=(1,2,3,4,5))
+                for room in local.states: await app.state.manager.operate(room)
+            return {"fixture":Path(directory).name}
         try:
             uvicorn.run(app,host="127.0.0.1",port=8090,workers=1,proxy_headers=False,
                 access_log=False,log_level="critical",loop="asyncio")
@@ -261,6 +297,135 @@ def main():
                     evidence = page.request.get(BASE+"/__closed/fan-evidence").json()
                     assert evidence['sets'] == fan_baseline and all(evidence['retained'].values())
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                # Commission Fan/Dry via the product UI; ventilation absent is
+                # independent. Exercise derived target changes and durable STOP.
+                assert page.request.get(BASE+'/__closed/mode-fixture/reset').ok
+                page.reload()
+                token = page.request.get(BASE+'/api/session').json()['token']
+                header = {'X-Demo-Token':token, 'Origin':BASE}
+                baseline_modes = page.request.get(BASE+'/__closed/fan-evidence').json()['sets']
+                rejected = page.request.post(BASE+'/api/controllers/room-1/local-controls', headers=header,
+                    data={'modes':[0,1,3,4]})
+                assert rejected.status == 422
+                card(1).locator('.local-configure').click()
+                dialog = page.locator('#local-controls-dialog')
+                dialog.locator('[name="mode_revoked"]').check()
+                dialog.get_by_role('button',name='Guardar controles').click()
+                expect(card(1).locator('.mode')).to_be_disabled()
+                initial_block = page.request.get(BASE+'/api/controllers/room-1').json()['local_controls']['mode_commissioning']
+                assert initial_block['wall_modes'] == [] and initial_block['revoked']
+                assert page.request.get(BASE+'/__closed/fan-evidence').json()['sets'] == baseline_modes
+                card(1).locator('.local-configure').click()
+                for mode in (0,1): dialog.locator(f'[name="modes"][value="{mode}"]').check()
+                dialog.locator('[name="mode_revoked"]').uncheck()
+                dialog.locator('[name="wall_verified"]').check()
+                dialog.locator('[name="restrictions"]').select_option('unlocked')
+                dialog.locator('[name="physical_scope"]').select_option('independent')
+                dialog.get_by_role('button',name='Guardar controles').click()
+                expect(card(1).locator('.mode')).to_be_enabled()
+                assert page.request.get(BASE+'/__closed/fan-evidence').json()['sets'] == baseline_modes
+                settings = page.request.get(BASE+'/api/controllers/room-1').json()['local_controls']
+                assert settings['mode_commissioning']['expires_at'] is None
+                # Persistent authority still applies after 60 days; explicit
+                # legacy expiry disables only extra targets, including in HTTP.
+                assert page.request.get(BASE+'/__closed/mode-fixture/persistent-old').ok
+                page.reload()
+                card(1).locator('.mode').select_option('1')
+                expect(card(1).locator('.operation-status')).to_have_text('Cambio confirmado')
+                assert page.request.get(BASE+'/__closed/mode-fixture/expired').ok
+                page.reload()
+                for mode in (0,1,5):
+                    expect(card(1).locator(f'.mode option[value="{mode}"]')).to_have_js_property('disabled',True)
+                for mode in (2,3,4):
+                    expect(card(1).locator(f'.mode option[value="{mode}"]')).to_have_js_property('disabled',False)
+                count = len(page.request.get(BASE+'/__closed/fan-evidence').json()['sets'])
+                token = page.request.get(BASE+'/api/session').json()['token']
+                for mode in (0,1,5):
+                    rejected = page.request.post(BASE+'/api/controllers/room-1/manual',
+                        headers={'X-Demo-Token':token, 'Origin':BASE},
+                        data={'operation_id':str(uuid4()),'action':'mode','value':mode,'expected_mode':1})
+                    assert rejected.status == 422
+                assert len(page.request.get(BASE+'/__closed/fan-evidence').json()['sets']) == count
+                card(1).locator('.mode').select_option('4')
+                expect(card(1).locator('.operation-status')).to_have_text('Cambio confirmado')
+                assert len(page.request.get(BASE+'/__closed/fan-evidence').json()['sets']) == count+1
+                expired_evidence = page.request.get(BASE+'/api/controllers/room-1').json()['local_controls']['mode_commissioning']
+                card(1).locator('.local-configure').click()
+                dialog.locator('[name="fans"][value="5"]').uncheck()
+                with page.expect_response(lambda r: r.url.endswith('/room-1/local-controls') and r.request.method == 'POST') as saved:
+                    dialog.get_by_role('button',name='Guardar controles').click()
+                assert saved.value.ok
+                assert page.request.get(BASE+'/api/controllers/room-1').json()['local_controls']['mode_commissioning'] == expired_evidence
+                # Renew explicitly, then record revocation without wall refresh.
+                card(1).locator('.local-configure').click()
+                dialog.locator('[name="wall_verified"]').check()
+                dialog.get_by_role('button',name='Guardar controles').click()
+                expect(card(1).locator('.mode option[value="0"]')).to_have_js_property('disabled',False)
+                renewed = page.request.get(BASE+'/api/controllers/room-1').json()['local_controls']['mode_commissioning']
+                card(1).locator('.local-configure').click()
+                dialog.locator('[name="mode_revoked"]').check()
+                dialog.get_by_role('button',name='Guardar controles').click()
+                expect(card(1).locator('.mode')).to_be_disabled()
+                revoked = page.request.get(BASE+'/api/controllers/room-1').json()['local_controls']['mode_commissioning']
+                assert revoked['revoked'] and revoked['checked_at'] == renewed['checked_at']
+                assert len(page.request.get(BASE+'/__closed/fan-evidence').json()['sets']) == count+1
+                page.reload()
+                expect(card(1).locator('.mode')).to_be_disabled()
+                card(1).locator('.local-configure').click()
+                dialog.locator('[name="mode_revoked"]').uncheck()
+                dialog.locator('[name="wall_verified"]').check()
+                dialog.get_by_role('button',name='Guardar controles').click()
+                expect(card(1).locator('.mode option[value="0"]')).to_have_js_property('disabled',False)
+                others = [page.request.get(BASE+f'/api/controllers/room-{i}').json()['state'] for i in range(2,7)]
+                for viewport in ({'width':1440,'height':1100}, {'width':390,'height':844}):
+                    page.set_viewport_size(viewport)
+                    for mode in (0,1,4,3):
+                        card(1).locator('.mode').select_option(str(mode))
+                        expect(card(1).locator('.operation-status')).to_have_text('Cambio confirmado')
+                        expect(card(1).locator('.mode')).to_have_value(str(mode))
+                        if mode in (0,1):
+                            expect(card(1).locator('.setpoint')).to_have_text('—')
+                            expect(card(1).locator('.increase')).to_be_disabled()
+                            expect(card(1).locator('.fan')).to_be_disabled()
+                        card(1).locator('.details').click()
+                        expect(page.locator('#detail-content .mode')).to_have_value(str(mode))
+                        expect(page.locator('#detail-content .local-targets')).to_contain_text('Objetivos guardados')
+                        if mode == 1:
+                            expect(page.locator('#detail-content .power')).to_be_disabled()
+                            expect(page.locator('#detail-content .mode-notice')).to_contain_text('automáticos')
+                        page.locator('#close-detail').click()
+                    expect(card(1).locator('.mode option[value="5"]')).to_have_js_property('disabled',True)
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                assert [page.request.get(BASE+f'/api/controllers/room-{i}').json()['state'] for i in range(2,7)] == others
+                # A separate synthetic ventilation unit can opt in explicitly.
+                # This does not enable ventilation in the Fan/Dry room.
+                card(2).locator('.local-configure').click()
+                dialog.locator('[name="modes"][value="5"]').check()
+                dialog.locator('[name="wall_verified"]').check()
+                dialog.locator('[name="restrictions"]').select_option('unlocked')
+                dialog.locator('[name="physical_scope"]').select_option('independent')
+                dialog.locator('[name="ventilation_hardware"]').check()
+                dialog.get_by_role('button',name='Guardar controles').click()
+                expect(card(2).locator('.mode option[value="5"]')).to_have_js_property('disabled',False)
+                card(2).locator('.mode').select_option('5')
+                expect(card(2).locator('.operation-status')).to_have_text('Cambio confirmado')
+                expect(card(2).locator('.setpoint')).to_have_text('—')
+                expect(card(2).locator('.increase')).to_be_disabled()
+                expect(card(2).locator('.fan')).to_be_disabled()
+                card(2).locator('.details').click()
+                expect(page.locator('#detail-content .mode')).to_have_value('5')
+                expect(page.locator('#detail-content .mode-notice')).to_contain_text('equipo compatible')
+                page.locator('#close-detail').click()
+                expect(card(1).locator('.mode option[value="5"]')).to_have_js_property('disabled',True)
+                assert page.request.get(BASE+'/__closed/mode-fixture/unknown-ack').ok
+                card(1).locator('.mode').select_option('1')
+                expect(card(1).locator('.operation-status')).to_contain_text('No se pudo confirmar')
+                count = len(page.request.get(BASE+'/__closed/fan-evidence').json()['sets'])
+                card(1).locator('.native-recover').click()
+                expect(card(1).locator('.mode')).to_be_disabled()
+                page.reload()
+                expect(card(1).locator('.mode')).to_be_disabled()
+                assert len(page.request.get(BASE+'/__closed/fan-evidence').json()['sets']) == count
                 # Consent/cancel/stale proposals on both viewports. No replay.
                 for viewport in ({'width':1440,'height':1100}, {'width':390,'height':844}):
                     page.set_viewport_size(viewport)
@@ -296,10 +461,42 @@ def main():
                     assert view['state']['heating_setpoint'] == 24
                     assert view['last_operation']['before_state']['setpoint_authorization']['targets'] == [32,33]
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                # Both contracts in the same room: an external mode change
+                # invalidates pair consent; a confirmed pair survives mode SET.
+                for viewport in ({'width':1440,'height':1100}, {'width':390,'height':844}):
+                    page.set_viewport_size(viewport)
+                    assert page.request.get(BASE+'/__closed/coordinated-fixture/coexistence').ok
+                    page.reload()
+                    expect(card(5).locator('.setpoint')).to_have_text('26°')
+                    before = page.request.get(BASE+'/__closed/setpoint-evidence').json()
+                    card(5).locator('.decrease').click()
+                    expect(dialog).to_be_visible()
+                    assert page.request.get(BASE+'/__closed/coordinated-fixture/external-dry').ok
+                    dialog.locator('#accept-setpoint-confirm').click()
+                    expect(card(5).locator('.operation-status')).to_contain_text('no está disponible')
+                    assert page.request.get(BASE+'/__closed/setpoint-evidence').json()['sets'] == before['sets']
+                    assert page.request.get(BASE+'/__closed/coordinated-fixture/coexistence').ok
+                    page.reload()
+                    card(5).locator('.decrease').click()
+                    expect(dialog).to_contain_text('Frío 26 → 25 °C; Calor 25 → 24 °C')
+                    dialog.locator('#accept-setpoint-confirm').click()
+                    expect(card(5).locator('.operation-status')).to_have_text('Cambio confirmado')
+                    retained = page.request.get(BASE+'/__closed/setpoint-evidence').json()
+                    for mode in (0,1,4,3):
+                        card(5).locator('.mode').select_option(str(mode))
+                        expect(card(5).locator('.operation-status')).to_have_text('Cambio confirmado')
+                        expect(card(5).locator('.mode')).to_have_value(str(mode))
+                        expect(card(5).locator('.setpoint')).to_have_text('24°' if mode == 4 else '25°' if mode == 3 else '—')
+                        assert page.request.get(BASE+'/__closed/setpoint-evidence').json() == retained
+                        view = page.request.get(BASE+'/api/controllers/room-5').json()
+                        assert view['manual_controls']['setpoint_proposals'] == []
+                        assert view['last_operation']['before_state']['mode_contract']['to_mode'] == mode
+                        assert view['state']['heating_setpoint'] == 24
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 assert errors==[],errors
                 browser.close()
         finally: stop()
-        print("PASS Chromium local HTTP: six synthetic setpoint/fan structures, independent Cool/Heat banks and Auto display without new writes, unknown/missing fields, raw extensions, strict GET, coordinated-pair consent/cancel/stale rejection, single SET and byte isolation, capability settings, uncertain without replay, history/restart, desktop/mobile; 0 JS errors; real drivers forbidden")
+        print("PASS Chromium local HTTP: six synthetic setpoint/fan structures, independent Cool/Heat banks and Auto display without new writes, unknown/missing fields, raw extensions, strict GET, Fan/Dry and conditional Ventilation commissioning/controls, durable mode STOP, coordinated-pair consent/cancel/stale rejection, single SET and byte isolation, capability settings, uncertain without replay, history/restart, desktop/mobile; 0 JS errors; real drivers forbidden")
 
 
 if __name__=="__main__":

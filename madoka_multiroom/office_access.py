@@ -12,6 +12,7 @@ import secrets
 import stat
 import sys
 import time
+from typing import ClassVar
 from importlib.metadata import version
 
 from pydantic import Field, field_validator, model_validator
@@ -29,6 +30,7 @@ class Controls(StrictModel):
     fans: tuple[int, ...] = ()
     minimum: int = Field(default=16, ge=16, le=32)
     maximum: int = Field(default=32, ge=16, le=32)
+    allowed_modes: ClassVar[tuple[int, ...]] = (2, 3, 4)
 
     @field_validator("modes", "fans", mode="before")
     @classmethod
@@ -39,7 +41,7 @@ class Controls(StrictModel):
     def bounds(self):
         if (self.minimum > self.maximum or len(set(self.modes)) != len(self.modes)
                 or len(set(self.fans)) != len(self.fans)
-                or any(type(v) is not int or v not in (2, 3, 4) for v in self.modes)
+                or any(type(v) is not int or v not in self.allowed_modes for v in self.modes)
                 or any(type(v) is not int or v not in range(1, 6) for v in self.fans)):
             raise ValueError("Invalid commissioned controls")
         return self
@@ -68,6 +70,7 @@ class OfficeConfig(StrictModel):
         if not address.is_private or address.is_unspecified or address.is_multicast:
             raise ValueError("Bind to a specific private or loopback address")
         if (set(self.controls) != {d.id for d in self.rooms.devices}
+                or any(mode not in (2, 3, 4) for control in self.controls.values() for mode in control.modes)
                 or not self.authorities or any(not re.fullmatch(r"[a-zA-Z0-9.-]+:[0-9]{4,5}", a) for a in self.authorities)):
             raise ValueError("Exact configured room capabilities and HTTPS authorities required")
         if self.rooms.max_concurrent_operations > self.rooms.max_active_devices:
