@@ -327,7 +327,7 @@ class RoomManager:
             async with self.capacity:
                 yield
 
-    async def native_manual(self, room_id, action, value, operation_id, reason, *, expected_mode=None):
+    async def native_manual(self, room_id, action, value, operation_id, reason, *, expected_mode=None, setpoint_confirmation=None):
         if not self.native_office:
             raise RoomUnavailable("Office native control unavailable")
         room = self.room(room_id)
@@ -349,7 +349,8 @@ class RoomManager:
                 async with self.manual_window():
                     options = {"expected_mode": expected_mode} if self.local else {}
                     state = await room.backend.manual(action, value, operation_id, reason,
-                        lambda field, desired: room.policy.desired({field: desired}), **options)
+                        lambda field, desired: room.policy.desired({field: desired}),
+                        setpoint_confirmation=setpoint_confirmation, **options)
                 room.latest, room.updated_at, room.updated_monotonic = state, time.time(), time.monotonic()
                 room.stats["writes"] += 1
                 self.store.append(room_id, int(room.updated_at * 1000), state)

@@ -12,8 +12,9 @@ import sys
 import time
 from importlib.metadata import version
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from .config import AppConfig, StrictModel
+from .coordinated_setpoint import CoordinatedSetpointProfile
 from .office_access import Controls, read_private
 from .local_modes import LocalControls
 from .native_access import native_state_directory
@@ -32,6 +33,7 @@ class LocalSession:
 class LocalConfig(StrictModel):
     rooms: AppConfig
     controls: dict[str, LocalControls]
+    coordinated_setpoints: dict[str, CoordinatedSetpointProfile] = Field(default_factory=dict)
 
     @field_validator("controls", mode="before")
     @classmethod
@@ -47,6 +49,10 @@ class LocalConfig(StrictModel):
             raise ValueError("La configuración debe contener las salas y sus controles")
         if self.rooms.max_concurrent_operations > self.rooms.max_active_devices:
             raise ValueError("La concurrencia supera el número de conexiones")
+        devices = {d.id: d for d in self.rooms.devices}
+        for room, profile in self.coordinated_setpoints.items():
+            if room not in devices or profile.identity_digest != hashlib.sha256(devices[room].address.encode()).hexdigest():
+                raise ValueError("El perfil de consignas no corresponde a este controlador")
         return self
 
 
@@ -65,12 +71,13 @@ def load_local_config(path):
             result[key] = value
         return result
     data = json.loads(read_private(Path(path).absolute()), object_pairs_hook=unique)
-    allowed = {"rooms", "controls", "host", "port", "authorities", "certificate", "private_key"}
+    allowed = {"rooms", "controls", "host", "port", "authorities", "certificate", "private_key", "coordinated_setpoints"}
     if not isinstance(data, dict) or set(data) - allowed:
         raise ValueError("Formato de configuración local desconocido")
     rooms = AppConfig.model_validate(data["rooms"])
     controls = {d.id: LocalControls.model_validate(data.get("controls", {}).get(d.id, {})) for d in rooms.devices}
-    return LocalConfig(rooms=rooms, controls=controls)
+    return LocalConfig(rooms=rooms, controls=controls,
+        coordinated_setpoints=data.get("coordinated_setpoints", {}))
 
 
 def native_environment():
@@ -138,6 +145,7 @@ class LocalFleet(OfficeFleet):
         if any(type(session) is not LocalSession for session in sessions.values()):
             raise ValueError("Local mode uses device sessions, not legacy authorizations")
         self.sessions = sessions
+        self.coordinated_setpoints = config.coordinated_setpoints
         self.settings_path = Path(settings_path) if settings_path else None
         self.errors = {}
         super().__init__(config, budget, sessions)
@@ -196,6 +204,7 @@ class LocalFleet(OfficeFleet):
             backend.controls = self.backends[room.id].controls
             backend.local_configured = getattr(self.backends[room.id], "local_configured", False)
         backend.info["backend"] = "native-local"
+        backend.coordinated_setpoint_profile = self.coordinated_setpoints.get(room.id)
         return backend
 
     async def ensure_room(self, room_id, *, explicit=False):

@@ -170,8 +170,19 @@ async function mutate(card, action, value) {
   } finally { card.busy = false; render(card,card.data); updateOverview(); }
 }
 function manual(card,action,value) {
-  if (localMode) return mutate(card,"manual",{operation_id:crypto.randomUUID(),action,value,
-    ...(action === "mode" ? {expected_mode:card.data.state.mode_id} : {})});
+  if (localMode) {
+    const proposal = action === "setpoint" && card.data.manual_controls?.setpoint_proposals?.find(p => p.value === value);
+    if (proposal) {
+      if (card.busy || failed) return;
+      pendingSetpoint = {card,value,token:proposal.token};
+      document.querySelector("#setpoint-confirm-description").textContent = `${card.data.name}: Frío ${proposal.cooling_before} → ${proposal.cooling_after} °C; Calor ${proposal.heating_before} → ${proposal.heating_after} °C.`;
+      document.querySelector("#setpoint-confirm-dialog").showModal();
+      document.querySelector("#cancel-setpoint-confirm").focus();
+      return;
+    }
+    return mutate(card,"manual",{operation_id:crypto.randomUUID(),action,value,
+      ...(action === "mode" ? {expected_mode:card.data.state.mode_id} : {})});
+  }
   if (!nativeOffice) return mutate(card,action,action === "power" ? {on:value} : action === "setpoint" ? {temp:value} : action === "mode" ? {mode:value} : {speed:value});
   confirmAction(card,"Confirmar cambio físico",`Se enviará una sola orden (${names[action] || action}: ${value}). Se guardará el estado anterior y se verificará con GET. No se repetirá automáticamente.`,"manual",{operation_id:crypto.randomUUID(),action,value});
 }
@@ -274,6 +285,17 @@ function confirmAction(card,title,description,action,body) {
   document.querySelector("#confirm-dialog").showModal();
   document.querySelector("#confirm-reason").focus();
 }
+let pendingSetpoint = null;
+document.querySelector("#cancel-setpoint-confirm").addEventListener("click", () => document.querySelector("#setpoint-confirm-dialog").close());
+document.querySelector("#setpoint-confirm-dialog").addEventListener("close", () => { pendingSetpoint = null; });
+document.querySelector("#setpoint-confirm-form").addEventListener("submit", e => {
+  e.preventDefault();
+  if (!pendingSetpoint) return;
+  const {card,value,token} = pendingSetpoint;
+  document.querySelector("#setpoint-confirm-dialog").close();
+  mutate(card,"manual",{operation_id:crypto.randomUUID(),action:"setpoint",value,
+    setpoint_confirmation:{token,confirmed:true}});
+});
 document.querySelector("#cancel-confirm").addEventListener("click", () => document.querySelector("#confirm-dialog").close());
 document.querySelector("#confirm-dialog").addEventListener("close", () => { pendingConfirmation = null; });
 document.querySelector("#confirm-form").addEventListener("submit", e => {

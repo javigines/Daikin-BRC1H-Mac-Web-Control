@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field
 
 from .config import AppConfig, StrictModel
+from .coordinated_setpoint import SetpointConfirmation
 from .manager import RoomBusy, RoomManager, RoomUnavailable
 from .storage import RoomStore
 from .policies import PolicySpec, DesiredPatch, AdminChange, ResetBudget
@@ -49,6 +50,7 @@ class LocalManualBody(StrictModel):
     action: Literal["power", "setpoint", "mode", "fan"]
     value: bool | int | float
     expected_mode: int | None = Field(default=None, strict=True, ge=0, le=5)
+    setpoint_confirmation: SetpointConfirmation | None = None
 
 
 class ReviewBody(StrictModel):
@@ -358,7 +360,8 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None, off
                 if body.action == "mode" and body.value in (0, 1, 5) and body.expected_mode is None:
                     raise ValueError("Expected current mode required")
                 return await lookup(request, controller_id).native_manual(controller_id,
-                    body.action, body.value, body.operation_id, "Local browser action", expected_mode=body.expected_mode)
+                    body.action, body.value, body.operation_id, "Local browser action",
+                    expected_mode=body.expected_mode, setpoint_confirmation=body.setpoint_confirmation)
             except ValueError:
                 raise HTTPException(422, "Este control o valor no está disponible en este Daikin") from None
 

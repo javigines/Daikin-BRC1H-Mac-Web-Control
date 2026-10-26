@@ -2,6 +2,8 @@
 
 Issue [#19](https://github.com/javigines/Daikin-BRC1H-Mac-Web-Control/issues/19).
 Base: `master` at `2cd1e97f157166b78eca355b167eb3b36b57be56`.
+Integrated offline with `master` at `ee7c715bf3cdbde25ff7825fc4238efff970d775`
+after PR #21 merged. The original branch history is retained.
 This change implements Local Fan/Dry mode selection and conditional Ventilation.
 It does not operate hardware. Existing Office commissioning remains restricted to
 Auto/Cool/Heat. Temperature SET construction and PRs #13/#16 are outside this work.
@@ -135,12 +137,19 @@ acceptance procedure for a later explicit physical GO, not a six-by-three matrix
 ## Offline validation
 
 Local complete suite: Python **3.12.15** and **3.14.9**, **876 passed** per
-version. Chromium desktop/mobile: all five existing harnesses pass with zero
+version on the original mode-only base. After integration with #21, **944 tests
+pass per version**, retaining the complete #21 and mode suites plus ten
+coexistence regressions. Chromium desktop/mobile: all five existing harnesses pass with zero
 JavaScript errors (`browser_demo`, `browser_physical_contract`,
 `browser_native_readonly`, `browser_office`, `browser_local`). The Local harness
 also commissions Fan/Dry, conditionally commissions a separate synthetic
 ventilation unit, verifies disabled card/detail controls, checks other-room
 state and retains a mode STOP after unknown ACK + GET-only review + refresh.
+It also exercises coordinated-pair consent/cancel/stale rejection alongside
+mode controls and, in the same synthetic room, rejects consent after an external
+mode change, then confirms the pair and preserves both targets across Fan/Dry/
+Heat/Cool transitions. GET-only temperature review retains #21 semantics;
+it cannot clear mode uncertainty.
 Hardware drivers are guarded out of these tests; SQLite paths are temporary.
 One existing FastAPI/httpx test-client deprecation warning is unrelated.
 
@@ -149,6 +158,26 @@ Reproduce in each supported interpreter with dependencies from
 then each of the five `integration/browser_*.py` harnesses listed above after
 `python -m playwright install chromium`. Run browser harnesses sequentially
 because they own fixed loopback ports and reject existing listeners.
+
+## Sequential integration boundaries
+
+The #21 integration resolves shared-file conflicts by preserving both contracts:
+`LocalManualBody`, `RoomManager.native_manual` and `OfficeBackend.manual` carry
+`expected_mode` and `setpoint_confirmation` independently. Readback and diagnostic
+unknown-ACK observation retain `authorized_targets` alongside `action`. The
+temperature proposal remains bound to the private exact profile and fresh raw
+baseline; commissioning modes grants no temperature-pair authority. Conversely,
+pair consent cannot authorize a mode action. `LocalConfig.coordinated_setpoints`
+remains outside `LocalControls` and ordinary controls persistence, defaulting off.
+The corrected deterministic full-operation deadline test from #21 is retained.
+
+PR #23 (fan writes) is intentionally not absorbed into #22. It remains DRAFT for
+the second integration after a separately authorized #22 merge. Preserve its
+`fan_policy` through inherited `Controls` fields and settings saves. Combine its
+durable fan-uncertainty exclusion with the Local mode exclusion in
+`PhysicalSessionBudget.acknowledge_operations`; neither GET-only review nor
+temperature consent may rearm them. No #22/#23 merge or deployment is authorized
+by this integration, and no physical/private profile is read or activated.
 
 ## Sources
 

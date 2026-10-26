@@ -5,6 +5,8 @@ verified close can release APP ownership. Unproven cleanup remains quarantined.
 """
 import asyncio
 import copy
+import hashlib
+import json
 import math
 import time
 from uuid import UUID
@@ -164,7 +166,7 @@ def setpoint_block(objects, mode, value, controls):
     return [(k, temp_to_bytes(value) if k == target else v) for k, v in fields.items()]
 
 
-def validate_setpoint_readback(before, args, observed):
+def validate_setpoint_readback(before, args, observed, *, authorized_targets=None, active_target=None):
     """Allow newly reported GET objects, but preserve the whole baseline.
 
     Every known byte (including the modified target) and every pre-existing
@@ -174,13 +176,26 @@ def validate_setpoint_readback(before, args, observed):
         setpoint_fields(observed)
     except BackendUnavailable as exc:
         raise SetpointUnconfirmed("readback_schema") from exc
-    changed = [k for k, v in args if v != before[k]]
-    if len(changed) != 1 or changed[0] not in (0x20, 0x21):
+    arguments = dict(args)
+    if len(arguments) != len(args) or arguments.keys() != SETPOINT_WIDTHS.keys():
         raise SetpointUnconfirmed("invalid_expected_change")
-    target = changed[0]
-    if observed[target] != dict(args)[target]:
-        raise SetpointUnconfirmed("no_effect" if observed[target] == before[target] else "active_target_mismatch")
-    expected = {**before, **dict(args)}
+    changed = {k for k, v in args if v != before[k]}
+    if authorized_targets is None:
+        # Existing callers authorize exactly one active target, never a pair.
+        authorized_targets = changed if len(changed) == 1 else set()
+    authorized = set(authorized_targets)
+    if not authorized or not authorized <= {0x20, 0x21} or changed != authorized:
+        raise SetpointUnconfirmed("invalid_expected_change")
+    if active_target is None and len(authorized) == 1:
+        active_target = next(iter(authorized))
+    if active_target not in authorized:
+        raise SetpointUnconfirmed("invalid_expected_change")
+    if any(observed[k] != arguments[k] for k in authorized):
+        if all(observed[k] == before[k] for k in authorized):
+            raise SetpointUnconfirmed("no_effect")
+        raise SetpointUnconfirmed("active_target_mismatch" if observed[active_target] != arguments[active_target]
+                                 else "inactive_target_mismatch")
+    expected = {**before, **arguments}
     if any(observed.get(k) != v for k, v in expected.items()):
         raise SetpointUnconfirmed("preserved_field_mismatch")
 
@@ -290,6 +305,38 @@ class OfficeBackend(PreparedDaikinBackend):
         # manual() checks this again against its fresh baseline before journaling.
         return self.latest.get("fan_id") is not None and manual_fan_pair(self.raw.get(CMD_GET_FAN, {}))
 
+    def _setpoint_plan(self, value):
+        """Recompute from observations; only a private exact profile permits two targets."""
+        objects = self.raw.get(CMD_GET_SETPOINT, {})
+        mode = self.latest["mode_id"]
+        args = setpoint_block(objects, mode, value, self.controls)
+        value = int(value)  # Canonical whole degrees for snapshot/API consent hashes.
+        active = 0x21 if mode == 4 else 0x20
+        profile = getattr(self, "coordinated_setpoint_profile", None)
+        if (not getattr(self.port.radio.grant, "local", False) or profile is None or mode != 3
+                or profile.identity_digest != hashlib.sha256(self.port.radio.grant.identity.encode()).hexdigest()
+                or value != profile.cooling_before - 1
+                or objects[0x20] != temp_to_bytes(profile.cooling_before)
+                or objects[0x21] != temp_to_bytes(profile.heating_before)
+                or tuple(objects[k] for k in (0x30, 0x31, 0x32)) != (b'\x00', b'\x00', b'\x01')):
+            return args, (active,), None
+        # Both banks, before and after, must fit their own effective limits.
+        setpoint_block(objects, 3, profile.cooling_before, self.controls)
+        setpoint_block(objects, 4, profile.heating_before, self.controls)
+        heating = dict(setpoint_block(objects, 4, profile.heating_before - 1, self.controls))[0x21]
+        args = [(k, heating if k == 0x21 else v) for k, v in args]
+        proposal = {"value": value, "cooling_before": profile.cooling_before,
+                    "cooling_after": value, "heating_before": profile.heating_before,
+                    "heating_after": profile.heating_before - 1}
+        # Bind consent to this room/identity, both targets, every baseline byte,
+        # extensions, power/mode/fan banks and owner limits. No raw data is exposed.
+        binding = {"room": self.room_id, "profile": profile.model_dump(mode="json"),
+                   "controls": self.controls.model_dump(mode="json"), "proposal": proposal,
+                   "wire": {str(c): {str(k): v.hex() for k, v in obj.items()}
+                            for c, obj in self.raw.items() if c != CMD_GET_SENSOR}}
+        proposal["token"] = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return args, (0x20, 0x21), proposal
+
     def control_view(self):
         stopped = self.stopped or self.closed or self.budget.pending_operation(self.room_id)
         limits = self.latest
@@ -300,9 +347,18 @@ class OfficeBackend(PreparedDaikinBackend):
                 setpoint_block(self.raw.get(CMD_GET_SETPOINT, {}), limits["mode_id"], candidate, self.controls)
             except (ValueError, BackendUnavailable):
                 setpoint = False
+        proposals = []
+        if setpoint and not stopped and getattr(self, "coordinated_setpoint_profile", None):
+            try:
+                _, _, proposal = self._setpoint_plan(limits["setpoint"] - 1)
+                if proposal:
+                    proposals.append(proposal)
+            except (ValueError, BackendUnavailable):
+                pass  # No proposal when either target is outside its verified window.
         local = getattr(self.port.radio.grant, "local", False)
         safe_power = not (local and limits.get("power_on") and limits.get("mode_id") in (1, 5))
         return {"power": self.controls.power and not stopped and safe_power, "setpoint": bool(setpoint and not stopped),
+                "setpoint_proposals": proposals,
                 "modes": (selectable_modes(self.controls) if local else list(self.controls.modes)) if not stopped else [],
                 "fans": list(self.controls.fans) if not stopped and self._fan_write_ready() else []}
 
@@ -331,7 +387,7 @@ class OfficeBackend(PreparedDaikinBackend):
     async def apply(self, action, value):
         raise BackendUnavailable("Native writes require explicit durable operation identity")
 
-    async def _manual_readback(self, action, value, before, raw, args, *, phase="readback_get"):
+    async def _manual_readback(self, action, value, before, raw, args, *, phase="readback_get", authorized_targets=None):
         self.manual_context['phase'] = phase
         initial = None
         if action == "mode" and getattr(self.budget, "local", False):
@@ -367,8 +423,12 @@ class OfficeBackend(PreparedDaikinBackend):
         expected = dict(before)
         expected[field] = value
         if action == "setpoint":
-            expected["heating_setpoint" if before["mode_id"] == 4 else "cooling_setpoint"] = value
-            validate_setpoint_readback(raw[CMD_GET_SETPOINT], args, self.raw[CMD_GET_SETPOINT])
+            active = 0x21 if before["mode_id"] == 4 else 0x20
+            authorized = authorized_targets or (active,)
+            for target in authorized:
+                expected["cooling_setpoint" if target == 0x20 else "heating_setpoint"] = int.from_bytes(dict(args)[target], "big") / 128
+            validate_setpoint_readback(raw[CMD_GET_SETPOINT], args, self.raw[CMD_GET_SETPOINT],
+                                      authorized_targets=authorized, active_target=active)
         if action == "fan":
             expected["heating_fan_id" if before["mode_id"] == 4 else "cooling_fan_id"] = value
         # Room temperature can move naturally. Preserve mode/power and both
@@ -382,7 +442,7 @@ class OfficeBackend(PreparedDaikinBackend):
             raise WriteNotConfirmed("GET readback did not confirm exactly the intended change")
         return observed
 
-    async def _observe_unknown_ack(self, error, value, before, raw, args, *, action="setpoint"):
+    async def _observe_unknown_ack(self, error, value, before, raw, args, *, action="setpoint", authorized_targets=None):
         """One GET observation on a healthy correlated stream; never confirm.
 
         A malformed/uncorrelated wire reply cannot enter here: the bridge stops
@@ -390,7 +450,8 @@ class OfficeBackend(PreparedDaikinBackend):
         only; it cannot replace the unknown ACK or clear durable uncertainty.
         """
         try:
-            await self._manual_readback(action, value, before, raw, args, phase="unknown_ack_get")
+            await self._manual_readback(action, value, before, raw, args, phase="unknown_ack_get",
+                                        authorized_targets=authorized_targets)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -402,10 +463,12 @@ class OfficeBackend(PreparedDaikinBackend):
         self._trace('ack_validate', result="unknown", reason=error.reason)
         raise error
 
-    async def manual(self, action, value, operation_id, reason, authorize_desired, *, expected_mode=None):
+    async def manual(self, action, value, operation_id, reason, authorize_desired, *, expected_mode=None, setpoint_confirmation=None):
         if self.stopped or self.closed or self.budget.pending_operation(self.room_id):
             raise BackendUnavailable("Native write stopped or unresolved; no replay")
         value = self.validate_action(action, value)
+        if setpoint_confirmation is not None and (action != "setpoint" or not getattr(self.budget, "local", False)):
+            raise ValueError("Coordinated confirmation requires a local setpoint action")
         if str(UUID(operation_id)) != operation_id or not 3 <= len(reason.strip()) <= 160:
             raise ValueError("Explicit operation identity and reason required")
         if self.budget.operation(operation_id) or self.budget.pending_operation(self.room_id):
@@ -417,6 +480,7 @@ class OfficeBackend(PreparedDaikinBackend):
             try:
                 before = await self._read(())
                 raw = copy.deepcopy(self.raw)
+                authorized_targets, proposal = None, None
                 if getattr(self.port.radio.grant, "local", False):
                     self.latest = copy.deepcopy(before)
                     try:
@@ -425,6 +489,14 @@ class OfficeBackend(PreparedDaikinBackend):
                             if before["mode_id"] != presented_mode:
                                 raise ValueError("Mode changed since presentation")
                             validate_mode_baseline(self.controls, before, raw)
+                        if action == "setpoint":
+                            args, authorized_targets, proposal = self._setpoint_plan(value)
+                            if proposal is not None:
+                                if (setpoint_confirmation is None or setpoint_confirmation.confirmed is not True
+                                        or setpoint_confirmation.token != proposal["token"]):
+                                    raise ValueError("Explicit confirmation of both current targets required")
+                            elif setpoint_confirmation is not None:
+                                raise ValueError("Coordinated proposal no longer applies")
                     except (ValueError, BackendUnavailable):
                         return {"_local_rejected": True}
                     if before[{"power": "power_on", "mode": "mode_id", "fan": "fan_id", "setpoint": "setpoint"}[action]] == value:
@@ -438,7 +510,9 @@ class OfficeBackend(PreparedDaikinBackend):
                         self.budget.finish_operation(operation_id, "confirmed", before)
                         return before
                 if action == "setpoint":
-                    args = setpoint_block(raw[CMD_GET_SETPOINT], before["mode_id"], value, self.controls)
+                    if authorized_targets is None:
+                        args = setpoint_block(raw[CMD_GET_SETPOINT], before["mode_id"], value, self.controls)
+                        authorized_targets = (0x21 if before["mode_id"] == 4 else 0x20,)
                     command = CMD_SET_SETPOINT
                 elif action == "fan":
                     if before["mode_id"] not in (3, 4):
@@ -457,6 +531,10 @@ class OfficeBackend(PreparedDaikinBackend):
                     evidence = getattr(self.controls, "mode_commissioning", None)
                     saved["mode_contract"] = {"from_mode": before["mode_id"], "to_mode": value,
                                               "commissioning": evidence.model_dump(mode="json") if evidence else None}
+                if action == "setpoint":
+                    saved["setpoint_authorization"] = {"targets": list(authorized_targets),
+                        "expected": {str(k): dict(args)[k].hex() for k in authorized_targets},
+                        "coordinated_confirmation": proposal}
                 self._trace('persist_baseline')
                 self.budget.begin_operation(self.port, self, operation_id, action, value, saved)
                 journaled = True
@@ -476,11 +554,11 @@ class OfficeBackend(PreparedDaikinBackend):
                         schema = validate_set_ack(command, ack)
                 except UnknownSetpointAck as exc:
                     self._trace('ack_validate', result="unknown", reason=exc.reason)
-                    await self._observe_unknown_ack(exc, value, before, raw, args)
+                    await self._observe_unknown_ack(exc, value, before, raw, args, authorized_targets=authorized_targets)
                 except UnknownModeAck as exc:
                     await self._observe_unknown_ack(exc, value, before, raw, args, action="mode")
                 self._trace('ack_validate', result="recognized", schema=schema or "legacy")
-                observed = await self._manual_readback(action, value, before, raw, args)
+                observed = await self._manual_readback(action, value, before, raw, args, authorized_targets=authorized_targets)
                 self._trace('confirmed')
                 self.budget.finish_operation(operation_id, "confirmed", observed)
                 self.latest = copy.deepcopy(observed)

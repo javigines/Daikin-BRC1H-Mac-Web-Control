@@ -1,5 +1,6 @@
 """Closed six-controller native SDK model. Never imports a physical driver."""
 import asyncio
+import hashlib
 from contextlib import contextmanager, ExitStack
 import os
 from pathlib import Path
@@ -40,6 +41,18 @@ def synthetic_setpoint_ack():
             for index, oid in enumerate(synthetic_setpoint_block())}
 
 
+def synthetic_coordinated_block():
+    """Invented before-pair, symbols and extensions; no installation capture."""
+    return {**synthetic_setpoint_block(extended=True), 0x20: temp_to_bytes(26),
+            0x21: temp_to_bytes(25), 0x30: b'\x00', 0x31: b'\x00', 0x32: b'\x01'}
+
+
+def synthetic_coordinated_profile(identity):
+    from madoka_multiroom.coordinated_setpoint import CoordinatedSetpointProfile
+    return CoordinatedSetpointProfile(profile="cool-lower-one-v1",
+        identity_digest=hashlib.sha256(identity.encode()).hexdigest(), cooling_before=26, heating_before=25)
+
+
 def synthetic_fan_blocks():
     """Six invented pairs and four opaque extensions; no installation data.
 
@@ -52,7 +65,7 @@ def synthetic_fan_blocks():
 
 
 @contextmanager
-def closed_office(directory, *, concurrency=2, port=8443, local=False):
+def closed_office(directory, *, concurrency=2, port=8443, local=False, coordinated_room=None):
     directory = Path(directory)
     directory.mkdir(mode=0o700, exist_ok=True)
     rooms = demo_config().model_dump(mode="json")
@@ -217,7 +230,12 @@ def closed_office(directory, *, concurrency=2, port=8443, local=False):
         stack.enter_context(patch.object(native_recovery, "stable_absence", fast_absence))
         if local:
             from madoka_multiroom.local_runtime import LocalConfig, LocalFleet, LocalSession
-            options.config = LocalConfig(rooms=config.rooms, controls=config.controls)
+            profiles = {}
+            if coordinated_room:
+                device = next(d for d in config.rooms.devices if d.id == coordinated_room)
+                profiles[device.id] = synthetic_coordinated_profile(device.address)
+                options.states[device.id][CMD_GET_SETPOINT] = synthetic_coordinated_block()
+            options.config = LocalConfig(rooms=config.rooms, controls=config.controls, coordinated_setpoints=profiles)
             state = access.native_state_directory()
             options.grants = {d.id: LocalSession(d.address, d.id, 1000) for d in config.rooms.devices}
             options.budget = PhysicalSessionBudget(state / "native-sessions.sqlite",
