@@ -29,7 +29,8 @@ sys.meta_path.insert(0, NoDriver())
 
 def serve(directory):
     import uvicorn
-    from integration.office_mock import closed_office, synthetic_setpoint_block, synthetic_setpoint_ack, synthetic_fan_blocks
+    from integration.office_mock import (closed_office, synthetic_setpoint_block, synthetic_setpoint_ack,
+        synthetic_fan_blocks, synthetic_coordinated_block, synthetic_coordinated_profile)
     from madoka_multiroom.api import build_local_app
     from madoka_multiroom.office_access import Controls
     with closed_office(directory, local=True) as local:
@@ -55,6 +56,22 @@ def serve(directory):
             return {"sets": [c[0] for c in local.calls if len(c) == 3 and c[1] == CMD_SET_SETPOINT],
                     "blocks": {r: {str(k): v.hex() for k, v in state[CMD_GET_SETPOINT].items()}
                                for r, state in local.states.items()}}
+        @app.get("/__closed/coordinated-fixture/{scenario}")
+        async def coordinated_fixture(scenario: str):
+            assert scenario in ('baseline', 'stale')
+            room = 'room-5'
+            if scenario == 'baseline':
+                local.states[room][CMD_GET_SETPOINT] = synthetic_coordinated_block()
+                local.states[room][CMD_GET_MODE][0x20] = b'\x03'
+                backend = local.fleet.backends[room]
+                backend.controls = Controls(power=True,setpoint=True)
+                backend.coordinated_setpoint_profile = synthetic_coordinated_profile(local.grants[room].identity)
+            else:
+                local.states[room][CMD_GET_SETPOINT][0x99] = b'\x09'
+            async with app.state.manager.room(room).lock:
+                pass
+            await app.state.manager.operate(room)
+            return {"fixture":Path(directory).name}
         @app.get("/__closed/fan-fixture/{scenario}")
         async def fan_fixture(scenario: str):
             # Test-only external observations, never device commands or a route
@@ -244,10 +261,45 @@ def main():
                     evidence = page.request.get(BASE+"/__closed/fan-evidence").json()
                     assert evidence['sets'] == fan_baseline and all(evidence['retained'].values())
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                # Consent/cancel/stale proposals on both viewports. No replay.
+                for viewport in ({'width':1440,'height':1100}, {'width':390,'height':844}):
+                    page.set_viewport_size(viewport)
+                    assert page.request.get(BASE+'/__closed/coordinated-fixture/baseline').ok
+                    page.reload()
+                    expect(card(5).locator('.setpoint')).to_have_text('26°')
+                    baseline = page.request.get(BASE+'/__closed/setpoint-evidence').json()
+                    card(5).locator('.decrease').click()
+                    dialog = page.locator('#setpoint-confirm-dialog')
+                    expect(dialog).to_be_visible()
+                    expect(dialog).to_contain_text('Frío 26 → 25 °C; Calor 25 → 24 °C')
+                    expect(dialog.locator('#cancel-setpoint-confirm')).to_be_focused()
+                    dialog.locator('#cancel-setpoint-confirm').click()
+                    expect(dialog).not_to_be_visible()
+                    assert page.request.get(BASE+'/__closed/setpoint-evidence').json() == baseline
+                    card(5).locator('.decrease').click()
+                    assert page.request.get(BASE+'/__closed/coordinated-fixture/stale').ok
+                    dialog.locator('#accept-setpoint-confirm').click()
+                    expect(card(5).locator('.operation-status')).to_contain_text('no está disponible')
+                    assert page.request.get(BASE+'/__closed/setpoint-evidence').json()['sets'] == baseline['sets']
+                    page.reload()
+                    before = page.request.get(BASE+'/__closed/setpoint-evidence').json()
+                    card(5).locator('.decrease').click()
+                    dialog.locator('#accept-setpoint-confirm').click()
+                    expect(card(5).locator('.setpoint')).to_have_text('25°')
+                    expect(card(5).locator('.operation-status')).to_have_text('Cambio confirmado')
+                    evidence = page.request.get(BASE+'/__closed/setpoint-evidence').json()
+                    assert evidence['sets'] == before['sets'] + ['room-5']
+                    expected = json.loads(json.dumps(before['blocks']))
+                    expected['room-5'].update({'32':'0c80','33':'0c00'})
+                    assert evidence['blocks'] == expected
+                    view = page.request.get(BASE+'/api/controllers/room-5').json()
+                    assert view['state']['heating_setpoint'] == 24
+                    assert view['last_operation']['before_state']['setpoint_authorization']['targets'] == [32,33]
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 assert errors==[],errors
                 browser.close()
         finally: stop()
-        print("PASS Chromium local HTTP: six synthetic setpoint/fan structures, independent Cool/Heat banks and Auto display without new writes, unknown/missing fields, raw extensions, strict GET, single SET and byte isolation, capability settings, uncertain without replay, history/restart, desktop/mobile; 0 JS errors; real drivers forbidden")
+        print("PASS Chromium local HTTP: six synthetic setpoint/fan structures, independent Cool/Heat banks and Auto display without new writes, unknown/missing fields, raw extensions, strict GET, coordinated-pair consent/cancel/stale rejection, single SET and byte isolation, capability settings, uncertain without replay, history/restart, desktop/mobile; 0 JS errors; real drivers forbidden")
 
 
 if __name__=="__main__":

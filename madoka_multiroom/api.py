@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field
 
 from .config import AppConfig, StrictModel
+from .coordinated_setpoint import SetpointConfirmation
 from .manager import RoomBusy, RoomManager, RoomUnavailable
 from .storage import RoomStore
 from .policies import PolicySpec, DesiredPatch, AdminChange, ResetBudget
@@ -48,6 +49,7 @@ class LocalManualBody(StrictModel):
     operation_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
     action: Literal["power", "setpoint", "mode", "fan"]
     value: bool | int | float
+    setpoint_confirmation: SetpointConfirmation | None = None
 
 
 class ReviewBody(StrictModel):
@@ -355,7 +357,8 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None, off
         async def local_manual(request: Request, controller_id: str, body: LocalManualBody):
             try:
                 return await lookup(request, controller_id).native_manual(controller_id,
-                    body.action, body.value, body.operation_id, "Local browser action")
+                    body.action, body.value, body.operation_id, "Local browser action",
+                    setpoint_confirmation=body.setpoint_confirmation)
             except ValueError:
                 raise HTTPException(422, "Este control o valor no está disponible en este Daikin") from None
 
