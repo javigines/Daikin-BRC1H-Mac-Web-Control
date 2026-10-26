@@ -29,7 +29,7 @@ sys.meta_path.insert(0, NoDriver())
 
 def serve(directory):
     import uvicorn
-    from integration.office_mock import closed_office, synthetic_setpoint_block
+    from integration.office_mock import closed_office, synthetic_setpoint_block, synthetic_setpoint_ack
     from madoka_multiroom.api import build_local_app
     from madoka_multiroom.office_access import Controls
     with closed_office(directory, local=True) as local:
@@ -39,7 +39,7 @@ def serve(directory):
         local.states['room-6'][CMD_GET_POWER][0x20] = b'\x00'
         def reply(room, command, objects, wrote):
             if command == CMD_SET_POWER: return {0x20: b'\x00'}
-            if command == CMD_SET_SETPOINT: return synthetic_setpoint_block()
+            if command == CMD_SET_SETPOINT: return synthetic_setpoint_ack()
             if command == CMD_GET_SETPOINT and wrote: objects[0x9B] = b'\x08'
             return objects
         local.reply_hook = reply
@@ -185,7 +185,7 @@ def main():
                 assert errors==[],errors
                 browser.close()
         finally: stop()
-        print("PASS Chromium local HTTP: six synthetic extended setpoint blocks, nonboolean symbols, status ACK plus GET, single SET and byte isolation, direct controls, capability settings, uncertain SET without replay, history/settings/restart, desktop/mobile; 0 JS errors; real drivers forbidden")
+        print("PASS Chromium local HTTP: six synthetic extended setpoint blocks, nonboolean symbols, compact ACK plus strict GET, single SET and byte isolation, direct controls, capability settings, uncertain SET without replay, history/settings/restart, desktop/mobile; 0 JS errors; real drivers forbidden")
 
 
 if __name__=="__main__":

@@ -1,5 +1,9 @@
 # Setpoint protocol compatibility
 
+This document records PR #14. Its ACK classification is superseded by
+[SET_SETPOINT ACK verification](setpoint-ack-verification.md); GET validation,
+SET byte preservation and readback invariants below remain in force.
+
 Base: `master`, `1e0da649ae21da28280bfd16d0a349117c950bf5` (PR #12).
 All examples and fixtures in this change are invented. No installation data,
 device identifiers, captures, or private configuration were collected.
@@ -60,13 +64,10 @@ limits must be present, ordered, within the existing conservative 10–40 degree
 envelope, and intersect the configured owner window. No missing/zero/inverted
 range is replaced with an assumed capability.
 
-ACK recognition is independent of GET validation. The existing empty forms
-remain accepted. A data-bearing SET_SETPOINT ACK must contain exactly the full
-known status schema, valid widths and supported range/mode flags. Its target
-and limit values are not used as observations or as evidence of success; for
-example, a full ACK with zero limits can only permit GET verification. Partial,
-extra, malformed or otherwise unrecognized ACKs leave the operation uncertain.
-No error-code meaning is invented.
+PR #14 initially reused GET field validation for full ACKs. The subsequent ACK
+iteration separates response profiles from GET values and documents bounded
+unknown-ACK observation. In every case, ACK contents alone cannot confirm effect;
+unknown ACKs retain uncertainty, and no error-code meaning is invented.
 
 `validate_setpoint_readback()` requires the exact requested target bytes and
 every untouched known byte, including the inactive target, flags, symbols and

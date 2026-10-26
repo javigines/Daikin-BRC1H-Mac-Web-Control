@@ -24,6 +24,48 @@ from .daikin import SessionState, WriteNotConfirmed
 
 
 SETPOINT_WIDTHS = {0x20: 2, 0x21: 2, **{oid: size for oid, size, _ in SETPOINT_EXTRA_FIELDS}}
+# ACK payloads are opaque: these are response profiles, not GET value schemas.
+# Public source rationale and the limits of this classification are in
+# docs/setpoint-ack-verification.md. Presence alone never implies acceptance.
+SETPOINT_ACK_BYTE_FIELDS = (0x30, 0x31, 0x32, 0xA0, 0xA1, 0xA4, 0xA5, 0xB0, 0xB1, 0xB4, 0xB5)
+SETPOINT_ACK_VARIABLE_FIELDS = (0x20, 0x21, 0xA2, 0xA3, 0xB2, 0xB3)
+SETPOINT_ACK_IDS = frozenset(SETPOINT_ACK_BYTE_FIELDS + SETPOINT_ACK_VARIABLE_FIELDS)
+SETPOINT_ACK_PROFILES = {
+    "full_fields": {**{k: 1 for k in SETPOINT_ACK_BYTE_FIELDS},
+                    **{k: 2 for k in SETPOINT_ACK_VARIABLE_FIELDS}},
+    "compact_fields": {k: 1 for k in SETPOINT_ACK_IDS},
+}
+
+
+class SetpointUnconfirmed(WriteNotConfirmed):
+    def __init__(self, reason):
+        self.reason = reason  # Fixed code only, never payload or exception text.
+        super().__init__(f"Setpoint not confirmed: {reason}")
+
+
+class UnknownSetpointAck(SetpointUnconfirmed):
+    pass
+
+
+def setpoint_ack_schema(objects):
+    """Recognize only bounded, correlated response profiles; decode no values.
+
+    pymadoka's Feature.update parses TLVs, then SetPointStatus.set_values uses
+    variable-width integers. OpenHAB's SET handler does not interpret the body.
+    We support full-width and uniform one-byte profiles, not arbitrary widths,
+    error codes, extensions, mixed-width variants or zero-length field values.
+    Framing, duplicate IDs and correlation must already have passed the bridge.
+    """
+    if objects == {} or objects == {0: b""}:
+        return "empty"
+    if set(objects) != SETPOINT_ACK_IDS:
+        raise UnknownSetpointAck("ack_object_ids")
+    if any(type(v) is not bytes for v in objects.values()):
+        raise UnknownSetpointAck("ack_value_type")
+    for name, widths in SETPOINT_ACK_PROFILES.items():
+        if all(len(objects[k]) == width for k, width in widths.items()):
+            return name
+    raise UnknownSetpointAck("ack_field_widths")
 
 
 def setpoint_fields(objects, *, extensions=True):
@@ -51,18 +93,13 @@ def validate_set_ack(command, objects):
     """A correlated SET response permits GET verification, never proves effect.
 
     pymadoka documents status-shaped SET replies whose value need not equal the
-    requested state. SetPointStatus.parse in Feature.update supports the complete
-    setpoint status block, not a partial echo or a guessed status/error byte.
-    See docs/setpoint-compatibility.md for pinned schema evidence.
+    requested state. ACK schemas deliberately do not use setpoint_fields().
+    See docs/setpoint-ack-verification.md for pinned schema evidence.
     """
+    if command == CMD_SET_SETPOINT:
+        return setpoint_ack_schema(objects)
     if objects in ({}, {0: b""}):
         return
-    if command == CMD_SET_SETPOINT:
-        try:
-            setpoint_fields(objects, extensions=False)
-        except BackendUnavailable as exc:
-            raise WriteNotConfirmed("Unrecognized SET_SETPOINT acknowledgement schema") from exc
-        return  # Status-shaped data is only permission to proceed to GET.
     values = range(2) if command == CMD_SET_POWER else range(6) if command == CMD_SET_MODE else ()
     if (set(objects) == {0x20} and type(objects[0x20]) is bytes
             and len(objects[0x20]) == 1 and objects[0x20][0] in values):
@@ -95,10 +132,16 @@ def validate_setpoint_readback(before, args, observed):
     try:
         setpoint_fields(observed)
     except BackendUnavailable as exc:
-        raise WriteNotConfirmed("Unrecognized setpoint readback schema") from exc
+        raise SetpointUnconfirmed("readback_schema") from exc
+    changed = [k for k, v in args if v != before[k]]
+    if len(changed) != 1 or changed[0] not in (0x20, 0x21):
+        raise SetpointUnconfirmed("invalid_expected_change")
+    target = changed[0]
+    if observed[target] != dict(args)[target]:
+        raise SetpointUnconfirmed("no_effect" if observed[target] == before[target] else "active_target_mismatch")
     expected = {**before, **dict(args)}
     if any(observed.get(k) != v for k, v in expected.items()):
-        raise WriteNotConfirmed("Setpoint block readback mismatch")
+        raise SetpointUnconfirmed("preserved_field_mismatch")
 
 
 class OfficeBackend(PreparedDaikinBackend):
@@ -221,6 +264,68 @@ class OfficeBackend(PreparedDaikinBackend):
     async def apply(self, action, value):
         raise BackendUnavailable("Native writes require explicit durable operation identity")
 
+    async def _manual_readback(self, action, value, before, raw, args, *, phase="readback_get"):
+        self.manual_context['phase'] = phase
+        initial = None
+        if action == "setpoint":
+            # First command after the ACK is the affected GET. No SET replay,
+            # no read retry, and no interpretation of ACK bytes as observations.
+            initial = {CMD_GET_SETPOINT: await self._request(CMD_GET_SETPOINT)}
+        if action == 'power' and getattr(self.budget, 'local', False):
+            # Existing power settling contract; unrelated to setpoint ACKs.
+            for attempt, delay in enumerate((0, .3, .6), 1):
+                await asyncio.sleep(delay)
+                reply = await self._request(CMD_GET_POWER)
+                group = observation(CMD_GET_POWER, reply)['power_on']
+                self._trace('power_readback', attempt=attempt, status=group['status'], value=group.get('value'))
+                if group['status'] != 'available':
+                    raise BackendUnavailable('Power readback schema unavailable')
+                if group['value'] == value:
+                    initial = {CMD_GET_POWER: reply}
+                    break
+            if initial is None:
+                raise WriteNotConfirmed('Power did not settle within three GET observations')
+        observed = await self._read((), initial=initial)
+        self._trace('readback_validate')
+        field = {"power": "power_on", "mode": "mode_id", "fan": "fan_id", "setpoint": "setpoint"}[action]
+        expected = dict(before)
+        expected[field] = value
+        if action == "setpoint":
+            expected["heating_setpoint" if before["mode_id"] == 4 else "cooling_setpoint"] = value
+            validate_setpoint_readback(raw[CMD_GET_SETPOINT], args, self.raw[CMD_GET_SETPOINT])
+        if action == "fan":
+            expected["heating_fan_id" if before["mode_id"] == 4 else "cooling_fan_id"] = value
+        # Room temperature can move naturally. Preserve mode/power and both
+        # inactive targets/fans. Diagnostics contain field names, never values.
+        keys = ("power_on", "mode_id", "cooling_setpoint", "heating_setpoint", "cooling_fan_id", "heating_fan_id")
+        mismatches = sorted(k for k in set(keys) | {field} if k in expected and observed.get(k) != expected[k])
+        if mismatches:
+            self._trace('readback_validate', fields=mismatches)
+            if action == "setpoint":
+                raise SetpointUnconfirmed("state_mismatch")
+            raise WriteNotConfirmed("GET readback did not confirm exactly the intended change")
+        return observed
+
+    async def _observe_unknown_ack(self, error, value, before, raw, args):
+        """One GET observation on a healthy correlated stream; never confirm.
+
+        A malformed/uncorrelated wire reply cannot enter here: the bridge stops
+        that session before returning an ACK. Any GET failure is diagnostic
+        only; it cannot replace the unknown ACK or clear durable uncertainty.
+        """
+        try:
+            await self._manual_readback("setpoint", value, before, raw, args, phase="unknown_ack_get")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._trace('unknown_ack_observation', result="not_verified",
+                        reason=getattr(exc, 'reason', 'get_unavailable'), error_class=type(exc).__name__)
+        else:
+            self._trace('unknown_ack_observation', result="requested_state_observed",
+                        reason="unknown_ack_still_blocks")
+        self._trace('ack_validate', result="unknown", reason=error.reason)
+        raise error
+
     async def manual(self, action, value, operation_id, reason, authorize_desired):
         if self.stopped or self.closed or self.budget.pending_operation(self.room_id):
             raise BackendUnavailable("Native write stopped or unresolved; no replay")
@@ -277,42 +382,14 @@ class OfficeBackend(PreparedDaikinBackend):
                 self.port.radio.arm_write(command, args)
                 self.manual_context['phase'] = 'set_exchange'
                 ack = await self._request(command, args)
-                self._trace('ack_validate', objects={str(k): v.hex() for k, v in ack.items()})
-                validate_set_ack(command, ack)
-                self.manual_context['phase'] = 'readback_get'
-                initial = None
-                if action == 'power' and getattr(self.budget, 'local', False):
-                    # Only successful, correlated GETs with an old value can
-                    # settle. A timeout/malformed reply stops immediately.
-                    for attempt, delay in enumerate((0, .3, .6), 1):
-                        await asyncio.sleep(delay)
-                        reply = await self._request(CMD_GET_POWER)
-                        group = observation(CMD_GET_POWER, reply)['power_on']
-                        self._trace('power_readback', attempt=attempt, status=group['status'], value=group.get('value'))
-                        if group['status'] != 'available':
-                            raise BackendUnavailable('Power readback schema unavailable')
-                        if group['value'] == value:
-                            initial = {CMD_GET_POWER: reply}
-                            break
-                    if initial is None:
-                        raise WriteNotConfirmed('Power did not settle within three GET observations')
-                observed = await self._read((), initial=initial)
-                self._trace('readback_validate')
-                expected = dict(before)
-                expected[field] = value
-                if action == "setpoint":
-                    expected["heating_setpoint" if before["mode_id"] == 4 else "cooling_setpoint"] = value
-                    validate_setpoint_readback(raw[CMD_GET_SETPOINT], args, self.raw[CMD_GET_SETPOINT])
-                if action == "fan":
-                    expected["heating_fan_id" if before["mode_id"] == 4 else "cooling_fan_id"] = value
-                # Room temperature can move naturally. Mode/power and both
-                # inactive targets/fans must remain unchanged unless requested.
-                keys = ("power_on", "mode_id", "cooling_setpoint", "heating_setpoint", "cooling_fan_id", "heating_fan_id")
-                mismatches = {k: {'expected': expected.get(k), 'observed': observed.get(k)}
-                    for k in set(keys) | {field} if k in expected and observed.get(k) != expected[k]}
-                if mismatches:
-                    self._trace('readback_validate', mismatches=mismatches)
-                    raise WriteNotConfirmed("GET readback did not confirm exactly the intended change")
+                self._trace('ack_validate')
+                try:
+                    schema = validate_set_ack(command, ack)
+                except UnknownSetpointAck as exc:
+                    self._trace('ack_validate', result="unknown", reason=exc.reason)
+                    await self._observe_unknown_ack(exc, value, before, raw, args)
+                self._trace('ack_validate', result="recognized", schema=schema or "legacy")
+                observed = await self._manual_readback(action, value, before, raw, args)
                 self._trace('confirmed')
                 self.budget.finish_operation(operation_id, "confirmed", observed)
                 self.latest = copy.deepcopy(observed)
@@ -321,9 +398,14 @@ class OfficeBackend(PreparedDaikinBackend):
                 if journaled:
                     self.budget.finish_operation(operation_id, "uncertain")
                 try:
+                    exchange = getattr(self.port, 'last_exchange', None) or {}
+                    fallback = ("reply_framing_or_correlation" if 'notification_error_class' in exchange
+                        else "get_unavailable" if self.manual_context['stage'] in ('readback_get', 'unknown_ack_get')
+                        else "operation_interrupted")
                     self._trace('failed', failed_stage=self.manual_context['stage'], error_class=type(exc).__name__,
+                        reason=getattr(exc, 'reason', fallback),
                         journaled=journaled, transport_ready=self.port.ready,
-                        exchange=getattr(self.port, 'last_exchange', None))
+                        exchange=exchange)
                 except Exception:
                     # A storage error must not replace the originating failure.
                     # The in-memory diagnostic remains available in room detail.

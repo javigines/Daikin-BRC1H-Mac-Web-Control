@@ -243,7 +243,7 @@ class Controller:
                 payload = await asyncio.wait_for(exchange(), timeout=timeout)
                 if self.failure:
                     raise ConnectionError(self.failure)
-                self.last_exchange.update(stage='decode', reply_hex=bytes(payload).hex())
+                self.last_exchange.update(stage='decode', reply_size=len(payload))
                 objects = parse_objects(payload)
                 self.last_exchange['stage'] = 'complete'
                 return objects
