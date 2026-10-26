@@ -21,6 +21,7 @@ from .controller_bridge import HardenedControllerBridge
 from .physical_fleet import PreparedDaikinBackend
 from .physical_sessions import PhysicalSessionBudget
 from .daikin import SessionState, WriteNotConfirmed
+from ..local_modes import selectable_modes, validate_mode_baseline, validate_mode_effect, MODE_NOTICES
 
 
 def manual_fan_pair(objects):
@@ -70,6 +71,19 @@ class SetpointUnconfirmed(WriteNotConfirmed):
 
 class UnknownSetpointAck(SetpointUnconfirmed):
     pass
+
+
+class UnknownModeAck(WriteNotConfirmed):
+    reason = "mode_ack_schema"
+
+
+def mode_ack_schema(objects, *, require_status=False):
+    if not require_status and objects in ({}, {0: b""}):
+        return "legacy_empty"
+    if (set(objects) == {0x20} and type(objects[0x20]) is bytes
+            and len(objects[0x20]) == 1 and objects[0x20][0] in range(6)):
+        return "mode_status_v1"
+    raise UnknownModeAck("Unrecognized SET_MODE acknowledgement schema")
 
 
 def setpoint_ack_schema(objects):
@@ -123,6 +137,8 @@ def validate_set_ack(command, objects):
     """
     if command == CMD_SET_SETPOINT:
         return setpoint_ack_schema(objects)
+    if command == CMD_SET_MODE:
+        return mode_ack_schema(objects)
     if objects in ({}, {0: b""}):
         return
     values = range(2) if command == CMD_SET_POWER else range(6) if command == CMD_SET_MODE else ()
@@ -228,6 +244,8 @@ class OfficeBackend(PreparedDaikinBackend):
         state["fan_id"] = None
         fan_status = {}
         local = getattr(self.port.radio.grant, "local", False)
+        if local and mode not in (3, 4):
+            state["setpoint"] = None
         if local or self.controls.fans:
             fans = raw[CMD_GET_FAN] = await self._request(CMD_GET_FAN)
             if local:
@@ -240,6 +258,10 @@ class OfficeBackend(PreparedDaikinBackend):
                 raise BackendUnavailable("Unsupported fan observations")
         state["field_status"] = {key: "available" if value is not None else "not_queried" for key, value in state.items()}
         state["field_status"].update(fan_status)
+        if local and mode not in (3, 4):
+            state["field_status"]["setpoint"] = "not_applicable"
+        if local:
+            state["mode_notice"] = MODE_NOTICES.get(mode, "Modo desconocido: controles deshabilitados")
         for key, oid in (("min_setpoint", 0xA3 if mode == 4 else 0xA2), ("max_setpoint", 0xB3 if mode == 4 else 0xB2)):
             value = raw[CMD_GET_SETPOINT].get(oid)
             if value and len(value) == 2 and 10 <= int.from_bytes(value, "big") / 128 <= 40:
@@ -278,14 +300,21 @@ class OfficeBackend(PreparedDaikinBackend):
                 setpoint_block(self.raw.get(CMD_GET_SETPOINT, {}), limits["mode_id"], candidate, self.controls)
             except (ValueError, BackendUnavailable):
                 setpoint = False
-        return {"power": self.controls.power and not stopped, "setpoint": bool(setpoint and not stopped),
-                "modes": list(self.controls.modes) if not stopped else [],
+        local = getattr(self.port.radio.grant, "local", False)
+        safe_power = not (local and limits.get("power_on") and limits.get("mode_id") in (1, 5))
+        return {"power": self.controls.power and not stopped and safe_power, "setpoint": bool(setpoint and not stopped),
+                "modes": (selectable_modes(self.controls) if local else list(self.controls.modes)) if not stopped else [],
                 "fans": list(self.controls.fans) if not stopped and self._fan_write_ready() else []}
 
     def validate_action(self, action, value):
         if action == "power" and self.controls.power and type(value) is bool:
+            if (getattr(self.port.radio.grant, "local", False) and not value
+                    and self.latest.get("mode_id") in (1, 5)):
+                raise ValueError("Supervised wall stop required for Dry drain/ventilation start")
             return value
         if action == "mode" and type(value) is int and value in self.controls.modes:
+            if getattr(self.port.radio.grant, "local", False) and value not in selectable_modes(self.controls):
+                raise ValueError("Fresh unlocked wall commissioning required")
             return value
         if action == "fan" and type(value) is int and value in self.controls.fans:
             if not self._fan_write_ready():
@@ -305,6 +334,8 @@ class OfficeBackend(PreparedDaikinBackend):
     async def _manual_readback(self, action, value, before, raw, args, *, phase="readback_get"):
         self.manual_context['phase'] = phase
         initial = None
+        if action == "mode" and getattr(self.budget, "local", False):
+            initial = {CMD_GET_MODE: await self._request(CMD_GET_MODE)}
         if action == "setpoint":
             # First command after the ACK is the affected GET. No SET replay,
             # no read retry, and no interpretation of ACK bytes as observations.
@@ -325,6 +356,13 @@ class OfficeBackend(PreparedDaikinBackend):
                 raise WriteNotConfirmed('Power did not settle within three GET observations')
         observed = await self._read((), initial=initial)
         self._trace('readback_validate')
+        if action == "mode" and getattr(self.budget, "local", False):
+            try:
+                validate_mode_effect(self.controls, value, raw, self.raw)
+            except WriteNotConfirmed as exc:
+                self._trace('readback_validate', fields=exc.fields, reason=exc.reason)
+                raise
+            return observed
         field = {"power": "power_on", "mode": "mode_id", "fan": "fan_id", "setpoint": "setpoint"}[action]
         expected = dict(before)
         expected[field] = value
@@ -344,7 +382,7 @@ class OfficeBackend(PreparedDaikinBackend):
             raise WriteNotConfirmed("GET readback did not confirm exactly the intended change")
         return observed
 
-    async def _observe_unknown_ack(self, error, value, before, raw, args):
+    async def _observe_unknown_ack(self, error, value, before, raw, args, *, action="setpoint"):
         """One GET observation on a healthy correlated stream; never confirm.
 
         A malformed/uncorrelated wire reply cannot enter here: the bridge stops
@@ -352,7 +390,7 @@ class OfficeBackend(PreparedDaikinBackend):
         only; it cannot replace the unknown ACK or clear durable uncertainty.
         """
         try:
-            await self._manual_readback("setpoint", value, before, raw, args, phase="unknown_ack_get")
+            await self._manual_readback(action, value, before, raw, args, phase="unknown_ack_get")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -364,7 +402,7 @@ class OfficeBackend(PreparedDaikinBackend):
         self._trace('ack_validate', result="unknown", reason=error.reason)
         raise error
 
-    async def manual(self, action, value, operation_id, reason, authorize_desired):
+    async def manual(self, action, value, operation_id, reason, authorize_desired, *, expected_mode=None):
         if self.stopped or self.closed or self.budget.pending_operation(self.room_id):
             raise BackendUnavailable("Native write stopped or unresolved; no replay")
         value = self.validate_action(action, value)
@@ -374,6 +412,7 @@ class OfficeBackend(PreparedDaikinBackend):
             raise BackendUnavailable("Duplicate or unresolved write; STOP, no replay")
         async def operation():
             journaled = False
+            presented_mode = self.latest.get("mode_id") if expected_mode is None else expected_mode
             self.manual_context = {'id': operation_id, 'start': time.monotonic(), 'stage': 'baseline', 'phase': 'baseline_get'}
             try:
                 before = await self._read(())
@@ -382,6 +421,10 @@ class OfficeBackend(PreparedDaikinBackend):
                     self.latest = copy.deepcopy(before)
                     try:
                         self.validate_action(action, value)
+                        if action == "mode":
+                            if before["mode_id"] != presented_mode:
+                                raise ValueError("Mode changed since presentation")
+                            validate_mode_baseline(self.controls, before, raw)
                     except (ValueError, BackendUnavailable):
                         return {"_local_rejected": True}
                     if before[{"power": "power_on", "mode": "mode_id", "fan": "fan_id", "setpoint": "setpoint"}[action]] == value:
@@ -410,6 +453,10 @@ class OfficeBackend(PreparedDaikinBackend):
                 if before[field] == value:
                     raise ValueError("Requested value already observed; no SET necessary")
                 saved = {"state": before, "wire": {str(cmd): {str(k): v.hex() for k, v in objects.items()} for cmd, objects in raw.items()}, "reason": reason}
+                if action == "mode" and getattr(self.budget, "local", False):
+                    evidence = getattr(self.controls, "mode_commissioning", None)
+                    saved["mode_contract"] = {"from_mode": before["mode_id"], "to_mode": value,
+                                              "commissioning": evidence.model_dump(mode="json") if evidence else None}
                 self._trace('persist_baseline')
                 self.budget.begin_operation(self.port, self, operation_id, action, value, saved)
                 journaled = True
@@ -422,10 +469,16 @@ class OfficeBackend(PreparedDaikinBackend):
                 ack = await self._request(command, args)
                 self._trace('ack_validate')
                 try:
-                    schema = validate_set_ack(command, ack)
+                    if (action == "mode" and getattr(self.budget, "local", False)
+                            and getattr(self.controls, "mode_commissioning", None) is not None):
+                        schema = mode_ack_schema(ack, require_status=True)
+                    else:
+                        schema = validate_set_ack(command, ack)
                 except UnknownSetpointAck as exc:
                     self._trace('ack_validate', result="unknown", reason=exc.reason)
                     await self._observe_unknown_ack(exc, value, before, raw, args)
+                except UnknownModeAck as exc:
+                    await self._observe_unknown_ack(exc, value, before, raw, args, action="mode")
                 self._trace('ack_validate', result="recognized", schema=schema or "legacy")
                 observed = await self._manual_readback(action, value, before, raw, args)
                 self._trace('confirmed')

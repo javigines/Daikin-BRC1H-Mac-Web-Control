@@ -125,3 +125,9 @@ Mac, not other devices. Exact loopback peer/Host, same-origin checks, CSRF token
 JSON/body limits, restrictive CSP and disabled legacy write routes protect against
 web-origin attacks. Local software running as your account is inside this trust
 boundary.
+
+## Mode commissioning
+
+Fan Only and Dry can be commissioned per room after a passive wall inventory.
+Ventilation additionally requires compatible equipment. See
+[mode controls, strict SET/ACK/GET contract and minimal supervised pilot](local-modes.md).

@@ -37,10 +37,16 @@ def serve(directory):
         for state in local.states.values():
             state[CMD_GET_SETPOINT] = synthetic_setpoint_block(extended=True)
         local.states['room-6'][CMD_GET_POWER][0x20] = b'\x00'
+        setpoint_rooms = set()
+        mode_fault = {"unknown_ack": False}
         def reply(room, command, objects, wrote):
             if command == CMD_SET_POWER: return {0x20: b'\x00'}
-            if command == CMD_SET_SETPOINT: return synthetic_setpoint_ack()
-            if command == CMD_GET_SETPOINT and wrote: objects[0x9B] = b'\x08'
+            if command == CMD_SET_SETPOINT:
+                setpoint_rooms.add(room)
+                return synthetic_setpoint_ack()
+            if command == CMD_SET_MODE:
+                return {0x20: b'\xff' if mode_fault['unknown_ack'] else b'\x03'}
+            if command == CMD_GET_SETPOINT and room in setpoint_rooms: objects[0x9B] = b'\x08'
             return objects
         local.reply_hook = reply
         if not local.fleet.settings_path.exists():
@@ -79,6 +85,17 @@ def serve(directory):
                              c[1] in (CMD_SET_POWER, CMD_SET_MODE, CMD_SET_SETPOINT, CMD_SET_FAN)],
                     "retained": {room: backend.raw.get(CMD_GET_FAN) == local.states[room][CMD_GET_FAN]
                                  for room, backend in local.fleet.backends.items()}}
+        @app.get("/__closed/mode-fixture/{scenario}")
+        async def mode_fixture(scenario: str):
+            assert scenario in ('reset', 'unknown-ack')
+            mode_fault['unknown_ack'] = scenario == 'unknown-ack'
+            if scenario == 'reset':
+                for room, state in local.states.items():
+                    state[CMD_GET_MODE] = {0x20:b'\x03'}
+                    state[CMD_GET_FAN] = {0x20:b'\x03', 0x21:b'\x02'}
+                    local.fleet.backends[room].controls = Controls(power=True, setpoint=True, modes=(2,3,4), fans=(1,2,3,4,5))
+                for room in local.states: await app.state.manager.operate(room)
+            return {"fixture":Path(directory).name}
         try:
             uvicorn.run(app,host="127.0.0.1",port=8090,workers=1,proxy_headers=False,
                 access_log=False,log_level="critical",loop="asyncio")
@@ -244,10 +261,79 @@ def main():
                     evidence = page.request.get(BASE+"/__closed/fan-evidence").json()
                     assert evidence['sets'] == fan_baseline and all(evidence['retained'].values())
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                # Commission Fan/Dry via the product UI; ventilation absent is
+                # independent. Exercise derived target changes and durable STOP.
+                assert page.request.get(BASE+'/__closed/mode-fixture/reset').ok
+                page.reload()
+                token = page.request.get(BASE+'/api/session').json()['token']
+                header = {'X-Demo-Token':token, 'Origin':BASE}
+                baseline_modes = page.request.get(BASE+'/__closed/fan-evidence').json()['sets']
+                rejected = page.request.post(BASE+'/api/controllers/room-1/local-controls', headers=header,
+                    data={'modes':[0,1,3,4]})
+                assert rejected.status == 422
+                card(1).locator('.local-configure').click()
+                dialog = page.locator('#local-controls-dialog')
+                for mode in (0,1): dialog.locator(f'[name="modes"][value="{mode}"]').check()
+                dialog.locator('[name="wall_verified"]').check()
+                dialog.locator('[name="restrictions"]').select_option('unlocked')
+                dialog.locator('[name="physical_scope"]').select_option('independent')
+                dialog.get_by_role('button',name='Guardar controles').click()
+                expect(card(1).locator('.mode')).to_be_enabled()
+                assert page.request.get(BASE+'/__closed/fan-evidence').json()['sets'] == baseline_modes
+                others = [page.request.get(BASE+f'/api/controllers/room-{i}').json()['state'] for i in range(2,7)]
+                for viewport in ({'width':1440,'height':1100}, {'width':390,'height':844}):
+                    page.set_viewport_size(viewport)
+                    for mode in (0,1,4,3):
+                        card(1).locator('.mode').select_option(str(mode))
+                        expect(card(1).locator('.operation-status')).to_have_text('Cambio confirmado')
+                        expect(card(1).locator('.mode')).to_have_value(str(mode))
+                        if mode in (0,1):
+                            expect(card(1).locator('.setpoint')).to_have_text('—')
+                            expect(card(1).locator('.increase')).to_be_disabled()
+                            expect(card(1).locator('.fan')).to_be_disabled()
+                        card(1).locator('.details').click()
+                        expect(page.locator('#detail-content .mode')).to_have_value(str(mode))
+                        expect(page.locator('#detail-content .local-targets')).to_contain_text('Objetivos guardados')
+                        if mode == 1:
+                            expect(page.locator('#detail-content .power')).to_be_disabled()
+                            expect(page.locator('#detail-content .mode-notice')).to_contain_text('automáticos')
+                        page.locator('#close-detail').click()
+                    expect(card(1).locator('.mode option[value="5"]')).to_have_js_property('disabled',True)
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                assert [page.request.get(BASE+f'/api/controllers/room-{i}').json()['state'] for i in range(2,7)] == others
+                # A separate synthetic ventilation unit can opt in explicitly.
+                # This does not enable ventilation in the Fan/Dry room.
+                card(2).locator('.local-configure').click()
+                dialog.locator('[name="modes"][value="5"]').check()
+                dialog.locator('[name="wall_verified"]').check()
+                dialog.locator('[name="restrictions"]').select_option('unlocked')
+                dialog.locator('[name="physical_scope"]').select_option('independent')
+                dialog.locator('[name="ventilation_hardware"]').check()
+                dialog.get_by_role('button',name='Guardar controles').click()
+                expect(card(2).locator('.mode option[value="5"]')).to_have_js_property('disabled',False)
+                card(2).locator('.mode').select_option('5')
+                expect(card(2).locator('.operation-status')).to_have_text('Cambio confirmado')
+                expect(card(2).locator('.setpoint')).to_have_text('—')
+                expect(card(2).locator('.increase')).to_be_disabled()
+                expect(card(2).locator('.fan')).to_be_disabled()
+                card(2).locator('.details').click()
+                expect(page.locator('#detail-content .mode')).to_have_value('5')
+                expect(page.locator('#detail-content .mode-notice')).to_contain_text('equipo compatible')
+                page.locator('#close-detail').click()
+                expect(card(1).locator('.mode option[value="5"]')).to_have_js_property('disabled',True)
+                assert page.request.get(BASE+'/__closed/mode-fixture/unknown-ack').ok
+                card(1).locator('.mode').select_option('1')
+                expect(card(1).locator('.operation-status')).to_contain_text('No se pudo confirmar')
+                count = len(page.request.get(BASE+'/__closed/fan-evidence').json()['sets'])
+                card(1).locator('.native-recover').click()
+                expect(card(1).locator('.mode')).to_be_disabled()
+                page.reload()
+                expect(card(1).locator('.mode')).to_be_disabled()
+                assert len(page.request.get(BASE+'/__closed/fan-evidence').json()['sets']) == count
                 assert errors==[],errors
                 browser.close()
         finally: stop()
-        print("PASS Chromium local HTTP: six synthetic setpoint/fan structures, independent Cool/Heat banks and Auto display without new writes, unknown/missing fields, raw extensions, strict GET, single SET and byte isolation, capability settings, uncertain without replay, history/restart, desktop/mobile; 0 JS errors; real drivers forbidden")
+        print("PASS Chromium local HTTP: six synthetic rooms, Fan/Dry wall commissioning and transitions, inactive/stored targets, Dry disabled controls, conditional Ventilation, unknown mode ACK durable STOP after review/refresh, setpoint/fan contracts, history/restart, desktop/mobile; 0 JS errors; real drivers forbidden")
 
 
 if __name__=="__main__":

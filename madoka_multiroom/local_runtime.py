@@ -12,9 +12,10 @@ import sys
 import time
 from importlib.metadata import version
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from .config import AppConfig, StrictModel
 from .office_access import Controls, read_private
+from .local_modes import LocalControls
 from .native_access import native_state_directory
 from .backends.base import BackendUnavailable
 from .backends.office_native import OfficeFleet
@@ -30,7 +31,15 @@ class LocalSession:
 
 class LocalConfig(StrictModel):
     rooms: AppConfig
-    controls: dict[str, Controls]
+    controls: dict[str, LocalControls]
+
+    @field_validator("controls", mode="before")
+    @classmethod
+    def legacy_controls(cls, value):
+        if isinstance(value, dict):
+            return {room: control.model_dump() if isinstance(control, Controls) else control
+                    for room, control in value.items()}
+        return value
 
     @model_validator(mode="after")
     def scope(self):
@@ -60,7 +69,7 @@ def load_local_config(path):
     if not isinstance(data, dict) or set(data) - allowed:
         raise ValueError("Formato de configuración local desconocido")
     rooms = AppConfig.model_validate(data["rooms"])
-    controls = {d.id: Controls.model_validate(data.get("controls", {}).get(d.id, {})) for d in rooms.devices}
+    controls = {d.id: LocalControls.model_validate(data.get("controls", {}).get(d.id, {})) for d in rooms.devices}
     return LocalConfig(rooms=rooms, controls=controls)
 
 
@@ -145,10 +154,17 @@ class LocalFleet(OfficeFleet):
                 digest = hashlib.sha256(self.sessions[room].identity.encode()).hexdigest()
                 if saved.get("identity") != digest:
                     raise ValueError("Los ajustes pertenecen a otro controlador")
-                self.backends[room].controls = Controls.model_validate(saved["controls"])
+                self.backends[room].controls = LocalControls.model_validate(saved["controls"])
                 self.backends[room].local_configured = True
 
     def configure_controls(self, room_id, controls):
+        controls = LocalControls.model_validate(controls.model_dump())
+        evidence = controls.mode_commissioning
+        current = self.backends[room_id].controls
+        changes_mode_authority = (evidence != getattr(current, "mode_commissioning", None)
+                                  or bool(set(controls.modes) - set(current.modes)))
+        if evidence and changes_mode_authority and any(not evidence.permits(mode) for mode in controls.modes):
+            raise ValueError("Revisa el inventario del mando; la evidencia ha caducado o está bloqueada")
         if not self.settings_path:
             raise ValueError("No se pueden guardar los ajustes locales")
         data = {"schema": 1, "rooms": {room: {
