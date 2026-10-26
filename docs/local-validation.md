@@ -77,9 +77,13 @@ implementation review, not a claim of independent physical verification.
   are tested with no automatic SET replay. Reconnection can collect observations
   while unresolved writes still disable manual controls. A user-requested GET
   acknowledges current state without claiming the prior write succeeded.
-- Fan read recognition uses the protocol range, not the enabled write subset;
-  an inactive speed outside that subset remains valid. Unknown optional fan
-  replies disable that control without discarding room temperature. Modes and
+- Local fan observations decode each bank independently as one byte 0–5, even
+  without configured fan write choices; Auto=0 is display-only. An inactive
+  manual speed outside the enabled write subset remains a valid observation.
+  Missing/unknown banks retain separate field status and do not hide the other
+  bank or room temperature. Raw extensions are preserved. The previous pair of
+  one-byte 1–5 values is still required for fan writes, including fresh preflight;
+  this correction grants no new SET permission. Modes and
   speeds beyond current observations require the simple local wall-supported
   choices; enum membership is not firmware evidence.
 - The existing private inventory is read unchanged; obsolete TLS fields do not

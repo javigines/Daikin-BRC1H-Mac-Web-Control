@@ -56,12 +56,20 @@ function updateControls(root, card) {
     for (const [css,key,observed] of [["mode","modes",state.mode_id],["fan","fans",state.fan_id]]) {
       const select = root.querySelector("."+css);
       if (!select) continue;
-      if (localMode && observed == null && !select.querySelector('option[value=""]')) {
-        const unavailable = document.createElement("option"); unavailable.value = ""; unavailable.textContent = "No disponible"; select.prepend(unavailable);
+      if (localMode && css === "fan" && !select.querySelector('option[value="0"]')) {
+        // An observed Auto value is display-only; it is never a write choice.
+        const automatic = document.createElement("option"); automatic.value = "0"; automatic.textContent = "Auto"; select.prepend(automatic);
+      }
+      if (localMode && observed == null) {
+        let unavailable = select.querySelector('option[value=""]');
+        if (!unavailable) { unavailable = document.createElement("option"); unavailable.value = ""; select.prepend(unavailable); }
+        unavailable.textContent = css !== "fan" ? "No disponible" :
+          state.field_status?.fan_id === "not_applicable" ? "No aplicable en este modo" :
+          state.field_status?.fan_id === "unknown" ? "Lectura desconocida" : "Sin lectura";
       }
       select.value = observed ?? "";
       select.disabled ||= !(caps[key]?.length);
-      for (const option of select.options) option.disabled = !caps[key]?.includes(Number(option.value));
+      for (const option of select.options) option.disabled = (localMode && css === "fan" && option.value === "0") || !caps[key]?.includes(Number(option.value));
     }
   }
   const status = root.querySelector(".operation-status");

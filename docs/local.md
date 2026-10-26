@@ -61,8 +61,14 @@ Values are restricted to the device window intersected with the configured local
 
 Use **Configurar controles** for supported modes and fan speeds visible on that
 room's wall controller. Do not enable a mode or speed merely because it appears
-in the protocol enum. A successful fan GET must recognize both fan values before
-fan controls become available. Unknown fields/flags/limits disable the affected
+in the protocol enum. Fan GET observations are independent of that write
+configuration: cooling and heating banks are decoded separately, with 0 shown
+as observed Auto. Only Cool/Heat select an active fan bank; other modes have no
+inferred active fan. Raw values and GET extensions are retained unchanged.
+The existing fan write gate still requires **both** banks to be one byte 1–5;
+Auto, missing or unknown data does not grant new writes. Auto is never a fan
+write choice. See [fan reading correction](local-fan-reading.md) for evidence
+limits and read-only acceptance. Unknown fields/flags/limits disable the affected
 control; unrecognized fan values do not hide otherwise valid room observations.
 Auto mode selection can be configured; Auto setpoint/fan writes remain unavailable
 because their semantics have not been verified. No installer field is changed.

@@ -40,6 +40,17 @@ def synthetic_setpoint_ack():
             for index, oid in enumerate(synthetic_setpoint_block())}
 
 
+def synthetic_fan_blocks():
+    """Six invented pairs and four opaque extensions; no installation data.
+
+    Cover two manual/manual, three manual/Auto and one Auto/manual shapes.
+    Manual values, extension IDs and bytes are deliberately synthetic.
+    """
+    return [{0x20: bytes([cool]), 0x21: bytes([heat]),
+             0x70: b"\xa1", 0x71: b"\x02\x03", 0x72: b"", 0x73: b"\x55\xaa\x01"}
+            for cool, heat in ((1, 1), (3, 0), (4, 0), (5, 0), (0, 2), (2, 5))]
+
+
 @contextmanager
 def closed_office(directory, *, concurrency=2, port=8443, local=False):
     directory = Path(directory)
