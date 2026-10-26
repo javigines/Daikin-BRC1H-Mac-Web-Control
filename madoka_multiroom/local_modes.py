@@ -1,7 +1,8 @@
 """Local wall commissioning and conservative mode-transition contracts.
 
 No GET, enum membership or BLE lock establishes physical capability/isolation.
-These attestations are private, identity-bound by LocalFleet, and expire.
+These attestations are private and identity-bound by LocalFleet. New authority
+persists until revoked or the installation changes; old explicit expiry stays.
 """
 import time
 from typing import ClassVar, Literal
@@ -15,7 +16,8 @@ from .office_access import Controls
 class ModeCommissioning(StrictModel):
     wall_modes: tuple[int, ...]
     checked_at: float = Field(strict=True, gt=0, allow_inf_nan=False)
-    expires_at: float = Field(strict=True, gt=0, allow_inf_nan=False)
+    expires_at: float | None = Field(default=None, strict=True, gt=0, allow_inf_nan=False)
+    revoked: bool = False
     restrictions: Literal["unknown", "unlocked", "locked"] = "unknown"
     physical_scope: Literal["unknown", "independent", "linked"] = "unknown"
     ventilation_hardware: bool = False
@@ -29,15 +31,20 @@ class ModeCommissioning(StrictModel):
 
     @model_validator(mode="after")
     def evidence(self):
-        if (not self.wall_modes or len(set(self.wall_modes)) != len(self.wall_modes)
+        if ((not self.wall_modes and not self.revoked) or len(set(self.wall_modes)) != len(self.wall_modes)
                 or any(type(v) is not int or v not in range(6) for v in self.wall_modes)
-                or not 0 < self.expires_at - self.checked_at <= 86400):
-            raise ValueError("Wall inventory must be explicit and valid for at most 24 hours")
+                or (self.expires_at is not None and self.expires_at <= self.checked_at)):
+            raise ValueError("Wall inventory must be explicit; optional expiry must follow inspection")
         return self
+
+    def blocked(self):
+        # These are known restrictions, unlike mere age or missing new evidence.
+        return self.revoked or self.restrictions == "locked" or self.physical_scope == "linked"
 
     def permits(self, mode, now=None):
         now = time.time() if now is None else now
-        return (self.checked_at <= now < self.expires_at and mode in self.wall_modes
+        return (not self.blocked() and self.checked_at <= now
+                and (self.expires_at is None or now < self.expires_at) and mode in self.wall_modes
                 and self.restrictions == "unlocked" and self.physical_scope == "independent"
                 and (mode != 5 or self.ventilation_hardware))
 
@@ -49,22 +56,23 @@ class LocalControls(Controls):
     @model_validator(mode="after")
     def commissioned_modes(self):
         extra = set(self.modes) & {0, 1, 5}
-        if extra and (self.mode_commissioning is None or any(
-                not self.mode_commissioning.permits(m, self.mode_commissioning.checked_at) for m in self.modes)):
-            raise ValueError("New modes require fresh unlocked wall inventory and proven independent equipment")
-        if self.mode_commissioning and not set(self.modes) <= set(self.mode_commissioning.wall_modes):
-            raise ValueError("Configured modes must occur in this room's wall inventory")
+        # Keep revoked/restricted records loadable. Runtime authority is separate
+        # from the historical inventory; legacy controls need no new attestation.
+        if extra and (self.mode_commissioning is None
+                      or not extra <= set(self.mode_commissioning.wall_modes)):
+            raise ValueError("New modes require explicit wall inventory for this equipment")
         return self
 
 
 def selectable_modes(controls):
     evidence = getattr(controls, "mode_commissioning", None)
-    if evidence is not None:
-        return [mode for mode in controls.modes if evidence.permits(mode)]
-    return [mode for mode in controls.modes if mode in (2, 3, 4)]
+    if evidence is not None and evidence.blocked():
+        return []
+    return [mode for mode in controls.modes if mode in (2, 3, 4)
+            or (evidence is not None and evidence.permits(mode))]
 
 
-def validate_mode_baseline(controls, before, raw):
+def validate_mode_baseline(controls, before, raw, target):
     from madoka_protocol import CMD_GET_MODE, CMD_GET_POWER, CMD_GET_SETPOINT, CMD_GET_FAN
     from .backends.office_native import setpoint_fields
     from .backends.base import BackendUnavailable
@@ -82,10 +90,17 @@ def validate_mode_baseline(controls, before, raw):
            for k in (0x20, 0x21)):
         raise ValueError("Both stored fan banks must be verified before a mode SET")
     evidence = getattr(controls, "mode_commissioning", None)
-    if mode[0] in (0, 1, 5) and evidence is None:
-        raise ValueError("Current mode requires explicit wall commissioning")
-    if evidence and not evidence.permits(mode[0]):
-        raise ValueError("Current mode is outside the fresh wall inventory")
+    if target not in selectable_modes(controls):
+        raise ValueError("Target mode is not authorized for this equipment")
+    if mode[0] in (0, 1, 5):
+        # Expiry prevents entering new modes, not a verified return to legacy.
+        # Historical support/scope must still be known; revocation/locks never
+        # acquire a bypass. Live blocks and pending writes remain enforced.
+        now = time.time()
+        if (evidence is None or evidence.checked_at > now
+                or not evidence.permits(mode[0], evidence.checked_at)
+                or (target in (0, 1, 5) and not evidence.permits(mode[0], now))):
+            raise ValueError("Current additional mode lacks valid equipment commissioning")
 
 
 def validate_mode_effect(controls, target, before_raw, after_raw):

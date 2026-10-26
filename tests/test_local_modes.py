@@ -31,12 +31,20 @@ def sets(local):
             (CMD_SET_MODE, CMD_SET_POWER, CMD_SET_SETPOINT, CMD_SET_FAN)]
 
 
-@pytest.mark.parametrize("patch", [dict(physical_scope="unknown"), dict(physical_scope="linked"),
-    dict(restrictions="locked"), dict(restrictions="unknown"), dict(ventilation_hardware=False),
-    dict(wall_modes=(0, 1, 2, 3, 4)), dict(wall_modes=(0, 0, 1)),
-    dict(expires_at=time.time()+90000), dict(checked_at=float('nan'))])
+@pytest.mark.parametrize("patch", [dict(wall_modes=(0, 1, 2, 3, 4)), dict(wall_modes=(0, 0, 1)),
+    dict(expires_at=time.time()-90000), dict(checked_at=float('nan'))])
 def test_invalid_commissioning(patch):
     with pytest.raises(ValidationError): commissioned(**patch)
+
+
+@pytest.mark.parametrize("patch", [dict(physical_scope="unknown"), dict(physical_scope="linked"),
+    dict(restrictions="locked"), dict(restrictions="unknown"), dict(ventilation_hardware=False),
+    dict(revoked=True)])
+def test_unverified_or_revoked_inventory_never_grants_new_modes(tmp_path, patch):
+    controls = commissioned(**patch)
+    with closed_office(tmp_path, local=True) as local:
+        with pytest.raises(ValueError): local.fleet.configure_controls('room-1', controls)
+        assert not sets(local)
 
 
 @pytest.mark.parametrize("mode", [0, 1, 5])
@@ -45,12 +53,12 @@ def test_enum_is_never_permission_and_office_stays_restricted(mode):
     with pytest.raises(ValidationError): Controls(modes=(mode,))
 
 
-def test_fan_dry_do_not_require_ventilation_and_expiry_disables_without_breaking_load():
+def test_fan_dry_do_not_require_ventilation_and_expiry_only_disables_extra_targets():
     controls = commissioned(modes=(0, 1, 2, 3, 4), ventilation_hardware=False)
     assert selectable_modes(controls) == [0, 1, 2, 3, 4]
     saved = controls.model_dump()
     saved['mode_commissioning'].update(checked_at=time.time()-7200, expires_at=time.time()-3600)
-    assert selectable_modes(LocalControls.model_validate(saved)) == []
+    assert selectable_modes(LocalControls.model_validate(saved)) == [2, 3, 4]
 
 
 @pytest.mark.parametrize("source", range(6))
@@ -210,7 +218,7 @@ def test_room_configuration_identity_reload_and_expiry_isolation(tmp_path):
         local.fleet.backends['room-2'].controls = retained
         local.fleet.configure_controls('room-2', retained.model_copy(update={'fans': (1,3)}))
         assert local.fleet.backends['room-2'].controls.mode_commissioning == expired
-        assert not selectable_modes(local.fleet.backends['room-2'].controls)
+        assert selectable_modes(local.fleet.backends['room-2'].controls) == [2, 3, 4]
         assert local.fleet.backends['room-2'].controls.fans == (1,3)
         import json
         data = json.loads(local.fleet.settings_path.read_text())

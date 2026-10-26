@@ -237,6 +237,7 @@ function localSettings(card) {
   const evidence = controls.mode_commissioning;
   for (const key of ["restrictions","physical_scope","dry_fan_effect"]) dialog.querySelector(`[name="${key}"]`).value = evidence?.[key] || (key === "dry_fan_effect" ? "preserve" : "unknown");
   dialog.querySelector('[name="ventilation_hardware"]').checked = evidence?.ventilation_hardware || false;
+  dialog.querySelector('[name="mode_revoked"]').checked = evidence?.revoked || false;
   dialog.querySelector('[name="wall_verified"]').checked = false;
   dialog.querySelector("form").onsubmit = e => {
     e.preventDefault();
@@ -247,12 +248,19 @@ function localSettings(card) {
     for (const key of ["minimum","maximum"]) patch[key] = Number(dialog.querySelector(`[name="${key}"]`).value);
     if (dialog.querySelector('[name="wall_verified"]').checked) {
       const now = Date.now()/1000;
-      patch.mode_commissioning = {wall_modes:patch.modes, checked_at:now, expires_at:now+86400,
+      patch.mode_commissioning = {wall_modes:patch.modes, checked_at:now, expires_at:null,
+        revoked:dialog.querySelector('[name="mode_revoked"]').checked,
         ventilation_hardware:dialog.querySelector('[name="ventilation_hardware"]').checked};
       for (const key of ["restrictions","physical_scope","dry_fan_effect"]) patch.mode_commissioning[key] = dialog.querySelector(`[name="${key}"]`).value;
     } else if (evidence) {
       // Editing another control never refreshes or erases wall commissioning.
       patch.mode_commissioning = evidence;
+      // Revocation can always be recorded without a new wall inspection. Only
+      // explicit renewed inspection may remove it; unrelated edits retain it.
+      if (dialog.querySelector('[name="mode_revoked"]').checked) patch.mode_commissioning = {...evidence, revoked:true};
+    } else if (dialog.querySelector('[name="mode_revoked"]').checked) {
+      // A legacy-only room may record a block without inventing wall inventory.
+      patch.mode_commissioning = {wall_modes:[], checked_at:Date.now()/1000, revoked:true};
     }
     dialog.close(); mutate(card,"local-controls",patch);
   };

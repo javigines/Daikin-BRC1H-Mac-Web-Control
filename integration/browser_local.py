@@ -113,8 +113,18 @@ def serve(directory):
                                  for room, backend in local.fleet.backends.items()}}
         @app.get("/__closed/mode-fixture/{scenario}")
         async def mode_fixture(scenario: str):
-            assert scenario in ('reset', 'unknown-ack')
+            assert scenario in ('reset', 'unknown-ack', 'expired', 'persistent-old')
             mode_fault['unknown_ack'] = scenario == 'unknown-ack'
+            if scenario in ('expired', 'persistent-old'):
+                from madoka_multiroom.local_modes import LocalControls
+                backend = local.fleet.backends['room-1']
+                data = backend.controls.model_dump()
+                data['mode_commissioning'].update(
+                    checked_at=time.time()-60*86400,
+                    expires_at=time.time()-3600 if scenario == 'expired' else None)
+                backend.controls = LocalControls.model_validate(data)
+                local.fleet.configure_controls('room-1', backend.controls)
+                await app.state.manager.operate('room-1')
             if scenario == 'reset':
                 for room, state in local.states.items():
                     state[CMD_GET_MODE] = {0x20:b'\x03'}
@@ -299,13 +309,73 @@ def main():
                 assert rejected.status == 422
                 card(1).locator('.local-configure').click()
                 dialog = page.locator('#local-controls-dialog')
+                dialog.locator('[name="mode_revoked"]').check()
+                dialog.get_by_role('button',name='Guardar controles').click()
+                expect(card(1).locator('.mode')).to_be_disabled()
+                initial_block = page.request.get(BASE+'/api/controllers/room-1').json()['local_controls']['mode_commissioning']
+                assert initial_block['wall_modes'] == [] and initial_block['revoked']
+                assert page.request.get(BASE+'/__closed/fan-evidence').json()['sets'] == baseline_modes
+                card(1).locator('.local-configure').click()
                 for mode in (0,1): dialog.locator(f'[name="modes"][value="{mode}"]').check()
+                dialog.locator('[name="mode_revoked"]').uncheck()
                 dialog.locator('[name="wall_verified"]').check()
                 dialog.locator('[name="restrictions"]').select_option('unlocked')
                 dialog.locator('[name="physical_scope"]').select_option('independent')
                 dialog.get_by_role('button',name='Guardar controles').click()
                 expect(card(1).locator('.mode')).to_be_enabled()
                 assert page.request.get(BASE+'/__closed/fan-evidence').json()['sets'] == baseline_modes
+                settings = page.request.get(BASE+'/api/controllers/room-1').json()['local_controls']
+                assert settings['mode_commissioning']['expires_at'] is None
+                # Persistent authority still applies after 60 days; explicit
+                # legacy expiry disables only extra targets, including in HTTP.
+                assert page.request.get(BASE+'/__closed/mode-fixture/persistent-old').ok
+                page.reload()
+                card(1).locator('.mode').select_option('1')
+                expect(card(1).locator('.operation-status')).to_have_text('Cambio confirmado')
+                assert page.request.get(BASE+'/__closed/mode-fixture/expired').ok
+                page.reload()
+                for mode in (0,1,5):
+                    expect(card(1).locator(f'.mode option[value="{mode}"]')).to_have_js_property('disabled',True)
+                for mode in (2,3,4):
+                    expect(card(1).locator(f'.mode option[value="{mode}"]')).to_have_js_property('disabled',False)
+                count = len(page.request.get(BASE+'/__closed/fan-evidence').json()['sets'])
+                token = page.request.get(BASE+'/api/session').json()['token']
+                for mode in (0,1,5):
+                    rejected = page.request.post(BASE+'/api/controllers/room-1/manual',
+                        headers={'X-Demo-Token':token, 'Origin':BASE},
+                        data={'operation_id':str(uuid4()),'action':'mode','value':mode,'expected_mode':1})
+                    assert rejected.status == 422
+                assert len(page.request.get(BASE+'/__closed/fan-evidence').json()['sets']) == count
+                card(1).locator('.mode').select_option('4')
+                expect(card(1).locator('.operation-status')).to_have_text('Cambio confirmado')
+                assert len(page.request.get(BASE+'/__closed/fan-evidence').json()['sets']) == count+1
+                expired_evidence = page.request.get(BASE+'/api/controllers/room-1').json()['local_controls']['mode_commissioning']
+                card(1).locator('.local-configure').click()
+                dialog.locator('[name="fans"][value="5"]').uncheck()
+                with page.expect_response(lambda r: r.url.endswith('/room-1/local-controls') and r.request.method == 'POST') as saved:
+                    dialog.get_by_role('button',name='Guardar controles').click()
+                assert saved.value.ok
+                assert page.request.get(BASE+'/api/controllers/room-1').json()['local_controls']['mode_commissioning'] == expired_evidence
+                # Renew explicitly, then record revocation without wall refresh.
+                card(1).locator('.local-configure').click()
+                dialog.locator('[name="wall_verified"]').check()
+                dialog.get_by_role('button',name='Guardar controles').click()
+                expect(card(1).locator('.mode option[value="0"]')).to_have_js_property('disabled',False)
+                renewed = page.request.get(BASE+'/api/controllers/room-1').json()['local_controls']['mode_commissioning']
+                card(1).locator('.local-configure').click()
+                dialog.locator('[name="mode_revoked"]').check()
+                dialog.get_by_role('button',name='Guardar controles').click()
+                expect(card(1).locator('.mode')).to_be_disabled()
+                revoked = page.request.get(BASE+'/api/controllers/room-1').json()['local_controls']['mode_commissioning']
+                assert revoked['revoked'] and revoked['checked_at'] == renewed['checked_at']
+                assert len(page.request.get(BASE+'/__closed/fan-evidence').json()['sets']) == count+1
+                page.reload()
+                expect(card(1).locator('.mode')).to_be_disabled()
+                card(1).locator('.local-configure').click()
+                dialog.locator('[name="mode_revoked"]').uncheck()
+                dialog.locator('[name="wall_verified"]').check()
+                dialog.get_by_role('button',name='Guardar controles').click()
+                expect(card(1).locator('.mode option[value="0"]')).to_have_js_property('disabled',False)
                 others = [page.request.get(BASE+f'/api/controllers/room-{i}').json()['state'] for i in range(2,7)]
                 for viewport in ({'width':1440,'height':1100}, {'width':390,'height':844}):
                     page.set_viewport_size(viewport)

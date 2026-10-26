@@ -488,7 +488,7 @@ class OfficeBackend(PreparedDaikinBackend):
                         if action == "mode":
                             if before["mode_id"] != presented_mode:
                                 raise ValueError("Mode changed since presentation")
-                            validate_mode_baseline(self.controls, before, raw)
+                            validate_mode_baseline(self.controls, before, raw, value)
                         if action == "setpoint":
                             args, authorized_targets, proposal = self._setpoint_plan(value)
                             if proposal is not None:

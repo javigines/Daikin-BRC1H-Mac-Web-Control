@@ -169,10 +169,20 @@ class LocalFleet(OfficeFleet):
         controls = LocalControls.model_validate(controls.model_dump())
         evidence = controls.mode_commissioning
         current = self.backends[room_id].controls
-        changes_mode_authority = (evidence != getattr(current, "mode_commissioning", None)
-                                  or bool(set(controls.modes) - set(current.modes)))
-        if evidence and changes_mode_authority and any(not evidence.permits(mode) for mode in controls.modes):
-            raise ValueError("Revisa el inventario del mando; la evidencia ha caducado o está bloqueada")
+        previous = getattr(current, "mode_commissioning", None)
+        if previous and previous.blocked() and (evidence is None or not evidence.blocked()):
+            if (evidence is None or evidence.checked_at <= previous.checked_at
+                    or evidence.checked_at > time.time() or evidence.restrictions != "unlocked"
+                    or evidence.physical_scope != "independent"):
+                raise ValueError("Una restricción conocida requiere nueva verificación explícita; no borrar evidencia")
+        added_extra = (set(controls.modes) - set(current.modes)) & {0, 1, 5}
+        changed_evidence = evidence != previous
+        if evidence and (added_extra or changed_evidence):
+            # A restriction/revocation must be persistable, even with retained
+            # disabled modes. It never grants additional authority or rearms STOP.
+            restrictive = evidence.blocked() and not added_extra
+            if not restrictive and any(not evidence.permits(mode) for mode in set(controls.modes) & {0, 1, 5}):
+                raise ValueError("Revisa la autorización de modos adicionales; caducada, revocada o sin verificar")
         if not self.settings_path:
             raise ValueError("No se pueden guardar los ajustes locales")
         data = {"schema": 1, "rooms": {room: {

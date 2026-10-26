@@ -21,19 +21,42 @@ stored targets without assuming those derived fields must remain equal.
 
 `LocalControls` adds private, identity-bound per-room wall commissioning. Existing
 settings load unchanged. New modes require a wall inventory, an unlocked and
-selectable mode menu, verified independent physical equipment and a bounded
-validity window. GET/enum membership cannot populate this evidence. Ventilation
+selectable mode menu and verified independent physical equipment. GET/enum
+membership cannot populate this evidence. Ventilation
 also requires positively identified compatible ventilation equipment and menu.
 Unknown or linked topology stays disabled for new commissioning: software room
 locks do not isolate connected indoor/outdoor groups. Group transitions need a
 separate group contract and are not implemented here. No installer, lock,
 centralized-control or master/slave setting is changed.
 
-The application policy caps a wall attestation at 24 hours (this is not a Daikin
-specified lifetime). Expired attestations still load, allowing the other rooms
-and reads to work, but expose no mode choices. Saving an unrelated control keeps
-the old evidence and its timestamps. Recheck the wall after any equipment or
-restriction change; expiry alone cannot detect an external lock change.
+New wall authorizations are **persistent and identity-bound**, with no daily
+inspection requirement (`expires_at: null`). The former mandatory 24-hour TTL
+was an application policy without a Daikin requirement; it is removed. Record
+`checked_at` as the inspection date, not a renewal clock. The private settings
+already bind this record to the controller identity and reject identity mismatch.
+Revoke authorization when the equipment, firmware/effect variant, linkage,
+installation, master/slave/centralized control or restrictions change; re-inventory
+before reauthorizing. GET cannot prove wall availability or detect every lock or
+installation change. The operator must record known changes; a fresh full GET
+baseline is still required for every operation.
+
+Existing records with an explicit expiry retain it; there is **no automatic
+migration or renewal** into persistent authority. Expiry removes only additional
+0/1/5 targets, retaining previously configured Auto/Cool/Heat 2/3/4. A return from
+an inventoried additional mode to a configured legacy mode remains possible after
+expiry with the same one-SET/ACK/GET and raw-preservation checks. The historical
+source mode, independent scope and hardware must still be established. An unknown
+additional source without commissioning still blocks a transition; GET alone
+cannot establish physical isolation.
+
+Known `revoked`, locked or linked records block **all mode targets**, including
+legacy and returns. They remain loadable and persist across restarts. The UI can
+record revocation without another wall inspection or any SET; removing a known
+restriction requires a new explicit wall verification with a later inspection
+date. Deleting the evidence or saving the former unblocked record cannot bypass
+it. Saving unrelated controls preserves the record and timestamps. Pending or
+uncertain writes remain blocked even after explicit new commissioning; no rearm
+is added. Other independent rooms retain their own controls.
 
 ### Active controls and effects
 
@@ -70,7 +93,9 @@ temperatures; mode confirmation does not prove humidity reduction.
    operation, and configured capability. UI sends its `expected_mode`; new-mode
    HTTP requests must include it. A changed fresh mode rejects before journal/SET.
 2. Under the room lock, read mode, power, both targets and metadata, sensor and
-   both fan banks. Require verified schemas and fresh commissioning/current mode.
+   both fan banks. Require verified schemas, current mode and applicable equipment
+   authorization. Recheck target authority after GET; apply the legacy/expiry
+   distinction above without bypassing known restrictions or uncertainty.
    Save the baseline and desired state durably before allowing a write.
 3. Send exactly one `0x4030`, one TLV `0x20`, one byte with the requested mode.
    The existing bridge verifies framing, command correlation and duplicate TLVs.
@@ -139,7 +164,12 @@ acceptance procedure for a later explicit physical GO, not a six-by-three matrix
 Local complete suite: Python **3.12.15** and **3.14.9**, **876 passed** per
 version on the original mode-only base. After integration with #21, **944 tests
 pass per version**, retaining the complete #21 and mode suites plus ten
-coexistence regressions. Chromium desktop/mobile: all five existing harnesses pass with zero
+coexistence regressions. The authority/expiry correction now passes **995 tests
+per version**, including 50 mode-authority regressions and the revised inventory
+validation cases: expired legacy actions/returns from all six source modes,
+expired additional targets, persistent 60-day authorization, known restrictions,
+revocation/reconfiguration/reload, changing authority during baseline GET and
+no rearm of pending/uncertain writes. Chromium desktop/mobile: all five existing harnesses pass with zero
 JavaScript errors (`browser_demo`, `browser_physical_contract`,
 `browser_native_readonly`, `browser_office`, `browser_local`). The Local harness
 also commissions Fan/Dry, conditionally commissions a separate synthetic
@@ -150,6 +180,10 @@ mode controls and, in the same synthetic room, rejects consent after an external
 mode change, then confirms the pair and preserves both targets across Fan/Dry/
 Heat/Cool transitions. GET-only temperature review retains #21 semantics;
 it cannot clear mode uncertainty.
+The Local browser also checks persistent authorization after 60 days, expiry
+with all additional HTTP targets rejected before SET, a verified Dry-to-Heat
+return, unchanged expired evidence after unrelated settings, and explicit
+revocation/renewal (including revocation with no fabricated wall inventory).
 Hardware drivers are guarded out of these tests; SQLite paths are temporary.
 One existing FastAPI/httpx test-client deprecation warning is unrelated.
 
