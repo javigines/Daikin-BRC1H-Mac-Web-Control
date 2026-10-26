@@ -51,6 +51,8 @@ independently establish the wall-selectable steps **for that unit and mode**;
 seeing an active Auto=0 is insufficient. Labels say Low/High and Medium protocol
 codes 2/3/4; they do not claim three different middle speeds. Only permitted
 choices and the read-only current observation are exposed in the selector.
+Disabling an existing per-mode grant in the UI also clears that room's general
+fan allowlist; its steps cannot silently become a legacy permission in both modes.
 
 | Case | Local permission |
 | --- | --- |
