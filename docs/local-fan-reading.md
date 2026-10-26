@@ -1,5 +1,9 @@
 # Local GET_FAN: independent observations, unchanged write permission
 
+Historical PR #17 contract. Issue #18 adds an explicit commissioned write path
+in [Local fan writing](local-fan-writing.md); only uncommissioned legacy rooms
+retain the write gate described below. The observation contract is unchanged.
+
 Base: `master` at `ae2bab76d16500bc63d4b7eeccbd091bbc08b65c` (PR #15).
 This correction is independent of the offline research draft PR #16 and needs
 no code from it. No temperature/ACK algorithm, extra mode, ledger, reconnection,

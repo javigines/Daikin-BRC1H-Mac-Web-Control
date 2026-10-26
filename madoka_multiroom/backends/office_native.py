@@ -18,6 +18,7 @@ from madoka_protocol import (
 )
 from madoka_readonly_canary import observation
 from ..native_access import require_native_context, manual_transport
+from ..fan_policy import recognized_fan_pair, fan_block
 from .base import BackendUnavailable
 from .controller_bridge import HardenedControllerBridge
 from .physical_fleet import PreparedDaikinBackend
@@ -88,6 +89,39 @@ def mode_ack_schema(objects, *, require_status=False):
     raise UnknownModeAck("Unrecognized SET_MODE acknowledgement schema")
 
 
+class FanUnconfirmed(WriteNotConfirmed):
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(f"Fan not confirmed: {reason}")
+
+
+class UnknownFanAck(FanUnconfirmed):
+    pass
+
+
+def fan_ack_schema(objects, *, commissioned=False):
+    """Source-shaped pair ACK; values only authorize the following GET."""
+    if set(objects) == {0x20, 0x21} and recognized_fan_pair(objects):
+        return "pair_v1"
+    if not commissioned and objects in ({}, {0: b""}):
+        return "legacy_empty"
+    raise UnknownFanAck("ack_profile_unknown")
+
+
+def validate_fan_readback(before, args, observed):
+    if not recognized_fan_pair(observed):
+        raise FanUnconfirmed("readback_schema")
+    expected = {**before, **dict(args)}
+    changed = [k for k, v in args if before[k] != v]
+    if len(changed) != 1:
+        raise FanUnconfirmed("invalid_expected_change")
+    target = changed[0]
+    if observed[target] != expected[target]:
+        raise FanUnconfirmed("no_effect" if observed[target] == before[target] else "active_target_mismatch")
+    if any(observed.get(k) != v for k, v in expected.items()):
+        raise FanUnconfirmed("preserved_fan_field_mismatch")
+
+
 def setpoint_ack_schema(objects):
     """Recognize only bounded, correlated response profiles; decode no values.
 
@@ -139,6 +173,8 @@ def validate_set_ack(command, objects):
     """
     if command == CMD_SET_SETPOINT:
         return setpoint_ack_schema(objects)
+    if command == CMD_SET_FAN:
+        return fan_ack_schema(objects)
     if command == CMD_SET_MODE:
         return mode_ack_schema(objects)
     if objects in ({}, {0: b""}):
@@ -262,7 +298,8 @@ class OfficeBackend(PreparedDaikinBackend):
         if local and mode not in (3, 4):
             state["setpoint"] = None
         if local or self.controls.fans:
-            fans = raw[CMD_GET_FAN] = await self._request(CMD_GET_FAN)
+            fans = raw[CMD_GET_FAN] = (initial[CMD_GET_FAN]
+                if initial and CMD_GET_FAN in initial else await self._request(CMD_GET_FAN))
             if local:
                 observed, fan_status = local_fan_observation(fans, mode)
                 state.update(observed)
@@ -301,9 +338,15 @@ class OfficeBackend(PreparedDaikinBackend):
             return False
         if not getattr(self.port.radio.grant, "local", False):
             return True
-        # Keep the old two-manual-field permission independent of presentation.
-        # manual() checks this again against its fresh baseline before journaling.
+        if self.controls.fan_policy is not None:
+            return bool(self.controls.fan_policy.choices(self.latest.get("mode_id"))) and recognized_fan_pair(self.raw.get(CMD_GET_FAN, {}))
+        # Legacy rooms retain their old manual/manual permission.
         return self.latest.get("fan_id") is not None and manual_fan_pair(self.raw.get(CMD_GET_FAN, {}))
+
+    def _fan_choices(self):
+        if getattr(self.port.radio.grant, "local", False) and self.controls.fan_policy is not None:
+            return [v for v in self.controls.fan_policy.choices(self.latest.get("mode_id")) if v in self.controls.fans]
+        return list(self.controls.fans)
 
     def _setpoint_plan(self, value):
         """Recompute from observations; only a private exact profile permits two targets."""
@@ -360,7 +403,10 @@ class OfficeBackend(PreparedDaikinBackend):
         return {"power": self.controls.power and not stopped and safe_power, "setpoint": bool(setpoint and not stopped),
                 "setpoint_proposals": proposals,
                 "modes": (selectable_modes(self.controls) if local else list(self.controls.modes)) if not stopped else [],
-                "fans": list(self.controls.fans) if not stopped and self._fan_write_ready() else []}
+                "fans": self._fan_choices() if not stopped and self._fan_write_ready() else [],
+                "fan_permission": "stopped" if stopped else "mode_not_commissioned" if limits.get("mode_id") not in (3, 4)
+                    else "not_commissioned" if not self._fan_choices() else "ready" if self._fan_write_ready()
+                    else "bank_profile_not_commissioned"}
 
     def validate_action(self, action, value):
         if action == "power" and self.controls.power and type(value) is bool:
@@ -372,9 +418,9 @@ class OfficeBackend(PreparedDaikinBackend):
             if getattr(self.port.radio.grant, "local", False) and value not in selectable_modes(self.controls):
                 raise ValueError("Fresh unlocked wall commissioning required")
             return value
-        if action == "fan" and type(value) is int and value in self.controls.fans:
+        if action == "fan" and type(value) is int and value in self._fan_choices():
             if not self._fan_write_ready():
-                raise ValueError("Fan write requires cooling/heating and the existing manual-field profile")
+                raise ValueError("Fan write requires commissioned Cool/Heat steps and a recognized bank pair")
             return value
         if action == "setpoint" and self.controls.setpoint:
             if type(value) not in (int, float) or not math.isfinite(value) or value != int(value):
@@ -396,6 +442,8 @@ class OfficeBackend(PreparedDaikinBackend):
             # First command after the ACK is the affected GET. No SET replay,
             # no read retry, and no interpretation of ACK bytes as observations.
             initial = {CMD_GET_SETPOINT: await self._request(CMD_GET_SETPOINT)}
+        if action == "fan":
+            initial = {CMD_GET_FAN: await self._request(CMD_GET_FAN)}
         if action == 'power' and getattr(self.budget, 'local', False):
             # Existing power settling contract; unrelated to setpoint ACKs.
             for attempt, delay in enumerate((0, .3, .6), 1):
@@ -431,6 +479,10 @@ class OfficeBackend(PreparedDaikinBackend):
                                       authorized_targets=authorized, active_target=active)
         if action == "fan":
             expected["heating_fan_id" if before["mode_id"] == 4 else "cooling_fan_id"] = value
+            validate_fan_readback(raw[CMD_GET_FAN], args, self.raw[CMD_GET_FAN])
+            for command in (CMD_GET_POWER, CMD_GET_MODE, CMD_GET_SETPOINT):
+                if any(self.raw[command].get(k) != v for k, v in raw[command].items()):
+                    raise FanUnconfirmed("preserved_configuration_mismatch")
         # Room temperature can move naturally. Preserve mode/power and both
         # inactive targets/fans. Diagnostics contain field names, never values.
         keys = ("power_on", "mode_id", "cooling_setpoint", "heating_setpoint", "cooling_fan_id", "heating_fan_id")
@@ -439,6 +491,8 @@ class OfficeBackend(PreparedDaikinBackend):
             self._trace('readback_validate', fields=mismatches)
             if action == "setpoint":
                 raise SetpointUnconfirmed("state_mismatch")
+            if action == "fan":
+                raise FanUnconfirmed("state_mismatch")
             raise WriteNotConfirmed("GET readback did not confirm exactly the intended change")
         return observed
 
@@ -485,6 +539,15 @@ class OfficeBackend(PreparedDaikinBackend):
                     self.latest = copy.deepcopy(before)
                     try:
                         self.validate_action(action, value)
+                        if action == "fan":
+                            if before["mode_id"] != presented_mode:
+                                raise ValueError("Fan mode changed since presentation")
+                            if await self._request(CMD_GET_MODE) != raw[CMD_GET_MODE]:
+                                raise ValueError("Fan mode changed during baseline")
+                            setpoint_fields(raw[CMD_GET_SETPOINT])
+                            self.validate_action(action, value)
+                            if self.budget.pending_operation(self.room_id):
+                                raise ValueError("Unresolved write appeared during fan baseline")
                         if action == "mode":
                             if before["mode_id"] != presented_mode:
                                 raise ValueError("Mode changed since presentation")
@@ -517,8 +580,7 @@ class OfficeBackend(PreparedDaikinBackend):
                 elif action == "fan":
                     if before["mode_id"] not in (3, 4):
                         raise ValueError("Fan control requires commissioned cooling/heating mode")
-                    target = 0x21 if before["mode_id"] == 4 else 0x20
-                    args = [(k, bytes([value]) if k == target else raw[CMD_GET_FAN][k]) for k in (0x20, 0x21)]
+                    args = fan_block(raw[CMD_GET_FAN], before["mode_id"], value)
                     command = CMD_SET_FAN
                 else:
                     command = CMD_SET_POWER if action == "power" else CMD_SET_MODE
@@ -535,6 +597,10 @@ class OfficeBackend(PreparedDaikinBackend):
                     saved["setpoint_authorization"] = {"targets": list(authorized_targets),
                         "expected": {str(k): dict(args)[k].hex() for k in authorized_targets},
                         "coordinated_confirmation": proposal}
+                commissioned_fan = bool(getattr(self.port.radio.grant, "local", False) and self.controls.fan_policy is not None)
+                if action == "fan":
+                    saved["fan_commissioning"] = self.controls.fan_policy.model_dump(mode="json") if commissioned_fan else None
+                    saved["fan_request_mode"] = presented_mode
                 self._trace('persist_baseline')
                 self.budget.begin_operation(self.port, self, operation_id, action, value, saved)
                 journaled = True
@@ -550,6 +616,8 @@ class OfficeBackend(PreparedDaikinBackend):
                     if (action == "mode" and getattr(self.budget, "local", False)
                             and getattr(self.controls, "mode_commissioning", None) is not None):
                         schema = mode_ack_schema(ack, require_status=True)
+                    elif action == "fan":
+                        schema = fan_ack_schema(ack, commissioned=commissioned_fan)
                     else:
                         schema = validate_set_ack(command, ack)
                 except UnknownSetpointAck as exc:
@@ -557,6 +625,8 @@ class OfficeBackend(PreparedDaikinBackend):
                     await self._observe_unknown_ack(exc, value, before, raw, args, authorized_targets=authorized_targets)
                 except UnknownModeAck as exc:
                     await self._observe_unknown_ack(exc, value, before, raw, args, action="mode")
+                except UnknownFanAck as exc:
+                    await self._observe_unknown_ack(exc, value, before, raw, args, action="fan")
                 self._trace('ack_validate', result="recognized", schema=schema or "legacy")
                 observed = await self._manual_readback(action, value, before, raw, args, authorized_targets=authorized_targets)
                 self._trace('confirmed')

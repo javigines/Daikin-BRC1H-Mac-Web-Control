@@ -19,6 +19,7 @@ from pydantic import Field, field_validator, model_validator
 
 from madoka_readonly_canary import PreflightError, verify_checkout, REVIEWED_BLEAK_VERSION
 from .config import AppConfig, StrictModel
+from .fan_policy import FanPolicy
 from .native_access import NativeAuthorization, _SEAL, native_state_directory
 
 
@@ -28,6 +29,7 @@ class Controls(StrictModel):
     setpoint: bool = False
     modes: tuple[int, ...] = ()
     fans: tuple[int, ...] = ()
+    fan_policy: FanPolicy | None = None
     minimum: int = Field(default=16, ge=16, le=32)
     maximum: int = Field(default=32, ge=16, le=32)
     allowed_modes: ClassVar[tuple[int, ...]] = (2, 3, 4)
@@ -44,6 +46,8 @@ class Controls(StrictModel):
                 or any(type(v) is not int or v not in self.allowed_modes for v in self.modes)
                 or any(type(v) is not int or v not in range(1, 6) for v in self.fans)):
             raise ValueError("Invalid commissioned controls")
+        if self.fan_policy and not set(self.fan_policy.cooling_steps + self.fan_policy.heating_steps) <= set(self.fans):
+            raise ValueError("Mode-specific fan steps must be within the owner's fan choices")
         return self
 
 

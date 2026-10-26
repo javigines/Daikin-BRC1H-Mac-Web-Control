@@ -61,6 +61,10 @@ function updateControls(root, card) {
     for (const [css,key,observed] of [["mode","modes",state.mode_id],["fan","fans",state.fan_id]]) {
       const select = root.querySelector("."+css);
       if (!select) continue;
+      if (localMode && css === "fan") {
+        const labels = {0:"Auto",1:"Bajo",2:"Medio · código 2",3:"Medio · código 3",4:"Medio · código 4",5:"Alto"};
+        for (const option of select.options) if (labels[option.value]) option.textContent = labels[option.value];
+      }
       if (localMode && css === "fan" && !select.querySelector('option[value="0"]')) {
         // An observed Auto value is display-only; it is never a write choice.
         const automatic = document.createElement("option"); automatic.value = "0"; automatic.textContent = "Auto"; select.prepend(automatic);
@@ -75,6 +79,14 @@ function updateControls(root, card) {
       select.value = observed ?? "";
       select.disabled ||= !(caps[key]?.length);
       for (const option of select.options) option.disabled = (localMode && css === "fan" && option.value === "0") || !caps[key]?.includes(Number(option.value));
+      if (localMode && css === "fan") {
+        for (const option of select.options) option.hidden = option.value !== select.value && !caps.fans?.includes(Number(option.value));
+        let hint = root.querySelector(".fan-permission");
+        if (!hint) { hint = document.createElement("p"); hint.className = "fan-permission small muted"; select.closest("label").after(hint); }
+        const reasons = {stopped:"Ventilador bloqueado: consulta el estado pendiente.",mode_not_commissioned:"Ventilador sin permiso en este modo.",
+          not_commissioned:"Ventilador sin velocidades confirmadas para esta sala y modo.",bank_profile_not_commissioned:"Ventilador sin permiso para estos bancos; revisa la configuración y las lecturas."};
+        hint.textContent = reasons[caps.fan_permission] || "Velocidades confirmadas para esta sala y modo. Auto es solo una lectura.";
+      }
     }
   }
   const status = root.querySelector(".operation-status");
@@ -181,7 +193,7 @@ function manual(card,action,value) {
       return;
     }
     return mutate(card,"manual",{operation_id:crypto.randomUUID(),action,value,
-      ...(action === "mode" ? {expected_mode:card.data.state.mode_id} : {})});
+    ...(["mode","fan"].includes(action) ? {expected_mode:card.data.state.mode_id} : {})});
   }
   if (!nativeOffice) return mutate(card,action,action === "power" ? {on:value} : action === "setpoint" ? {temp:value} : action === "mode" ? {mode:value} : {speed:value});
   confirmAction(card,"Confirmar cambio físico",`Se enviará una sola orden (${names[action] || action}: ${value}). Se guardará el estado anterior y se verificará con GET. No se repetirá automáticamente.`,"manual",{operation_id:crypto.randomUUID(),action,value});
@@ -233,6 +245,8 @@ function localSettings(card) {
   dialog.querySelector("h2").textContent = `Controles · ${card.data.name}`;
   for (const key of ["power","setpoint"]) dialog.querySelector(`[name="${key}"]`).checked = controls[key];
   for (const key of ["modes","fans"]) for (const input of dialog.querySelectorAll(`[name="${key}"]`)) input.checked = controls[key].includes(Number(input.value));
+  dialog.querySelector('[name="fan_policy_enabled"]').checked = controls.fan_policy != null;
+  for (const bank of ["cooling_steps","heating_steps"]) for (const input of dialog.querySelectorAll(`[name="fan_${bank}"]`)) input.checked = controls.fan_policy?.[bank]?.includes(Number(input.value)) || false;
   for (const key of ["minimum","maximum"]) dialog.querySelector(`[name="${key}"]`).value = controls[key];
   const evidence = controls.mode_commissioning;
   for (const key of ["restrictions","physical_scope","dry_fan_effect"]) dialog.querySelector(`[name="${key}"]`).value = evidence?.[key] || (key === "dry_fan_effect" ? "preserve" : "unknown");
@@ -245,6 +259,13 @@ function localSettings(card) {
     const patch = {...controls};
     for (const key of ["power","setpoint"]) patch[key] = dialog.querySelector(`[name="${key}"]`).checked;
     for (const key of ["modes","fans"]) patch[key] = [...dialog.querySelectorAll(`[name="${key}"]:checked`)].map(input => Number(input.value));
+    patch.fan_policy = null;
+    if (controls.fan_policy != null && !dialog.querySelector('[name="fan_policy_enabled"]').checked) patch.fans = [];
+    if (dialog.querySelector('[name="fan_policy_enabled"]').checked) {
+      patch.fan_policy = {ack_profile:"pair_v1"};
+      for (const bank of ["cooling_steps","heating_steps"]) patch.fan_policy[bank] = [...dialog.querySelectorAll(`[name="fan_${bank}"]:checked`)].map(input => Number(input.value));
+      patch.fans = [...new Set([...patch.fans,...patch.fan_policy.cooling_steps,...patch.fan_policy.heating_steps])];
+    }
     for (const key of ["minimum","maximum"]) patch[key] = Number(dialog.querySelector(`[name="${key}"]`).value);
     if (dialog.querySelector('[name="wall_verified"]').checked) {
       const now = Date.now()/1000;

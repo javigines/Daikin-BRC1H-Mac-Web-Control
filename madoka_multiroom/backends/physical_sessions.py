@@ -281,8 +281,9 @@ class PhysicalSessionBudget:
 
     def acknowledge_operations(self, room, observed, reason):
         with self.db:
-            self.db.execute("UPDATE native_operations SET status='reviewed_uncertain',observed=? WHERE room=? AND status IN ('pending','uncertain') AND NOT (action='mode' AND ?)",
-                            (json.dumps({"state": observed, "reason": reason}), room, bool(getattr(self, 'local', False))))
+            self.db.execute("UPDATE native_operations SET status='reviewed_uncertain',observed=? WHERE room=? AND status IN ('pending','uncertain') AND NOT (action='fan' AND ?) AND NOT (action='mode' AND ?)",
+                            (json.dumps({"state": observed, "reason": reason}), room,
+                             bool(getattr(self, 'local', False)), bool(getattr(self, 'local', False))))
 
     def resolve_offline(self, evidence):
         if self.native:

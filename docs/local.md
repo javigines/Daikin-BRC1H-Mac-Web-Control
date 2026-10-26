@@ -65,12 +65,15 @@ in the protocol enum. Fan GET observations are independent of that write
 configuration: cooling and heating banks are decoded separately, with 0 shown
 as observed Auto. Only Cool/Heat select an active fan bank; other modes have no
 inferred active fan. Raw values and GET extensions are retained unchanged.
-The existing fan write gate still requires **both** banks to be one byte 1–5;
-Auto, missing or unknown data does not grant new writes. Auto is never a fan
-write choice. See [fan reading correction](local-fan-reading.md) for evidence
-limits and read-only acceptance. Unknown fields/flags/limits disable the affected
+Legacy fan permissions retain the two-manual-bank gate. The optional **Ventilador
+con bancos Auto/manual** settings add explicit per-room Cool/Heat step permissions
+for complete one-byte 0–5 pairs, preserving inactive Auto=0 exactly. Reading Auto
+never grants permission, and Auto is never a fan write choice. See
+[fan writing and minimal physical pilot](local-fan-writing.md) for the bounded
+ACK/GET contract and pending physical acceptance, and the historical
+[fan reading correction](local-fan-reading.md). Unknown fields/flags/limits disable the affected
 control; unrecognized fan values do not hide otherwise valid room observations.
-Auto mode selection can be configured; Auto setpoint/fan writes remain unavailable
+Auto mode selection can be configured; setpoint/fan writes in Auto mode remain unavailable
 because their semantics have not been verified. No installer field is changed.
 
 A normal click sends at most one logical SET, with a unique operation ID, fresh

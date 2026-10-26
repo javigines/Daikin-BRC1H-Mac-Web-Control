@@ -252,6 +252,25 @@ def test_explicit_uncertain_review_reads_and_never_replays_set(office, tmp_path)
     asyncio.run(case())
 
 
+def test_legacy_office_fan_uncertainty_keeps_explicit_get_only_review(office, tmp_path):
+    async def case():
+        store = RoomStore(":memory:", mode="real")
+        manager = RoomManager(office.config.rooms, store, offline_fleet=office.fleet)
+        backend = await ready(office)
+        await manager.operate("room-1")
+        office.apply_writes = False
+        with pytest.raises(RoomUnavailable):
+            await manager.native_manual("room-1", "fan", 5, str(uuid4()), "Owner test")
+        assert office.budget.pending_operation("room-1")
+        state = await manager.native_recover("room-1", "Owner accepts actual GET observations")
+        assert state["last_operation"]["status"] == "reviewed_uncertain"
+        assert not office.budget.pending_operation("room-1")
+        assert len(sets(office)) == 1
+        await manager.close()
+        store.close()
+    asyncio.run(case())
+
+
 def test_stable_absence_does_not_use_elapsed_time_as_proof():
     async def case():
         await stable_absence(lambda: (0, False), duration=.01)
