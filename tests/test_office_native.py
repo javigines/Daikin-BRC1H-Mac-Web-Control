@@ -99,12 +99,17 @@ def test_ambiguous_write_stops_once_without_replay_and_survives_restart(office, 
             office.error = asyncio.CancelledError() if fault == "cancel" else ConnectionError("fake disconnected") if fault == "disconnect" else None
         if fault == "readback": office.fail_readback = True
         if fault in ("inactive_changed", "mode_changed"):
-            office.stage, office.delay = "readback", .03
-            async def external():
-                await asyncio.sleep(.01)
-                if fault == "inactive_changed": office.states["room-1"][CMD_GET_SETPOINT][0x21] = temp_to_bytes(26)
-                else: office.states["room-1"][CMD_GET_MODE][0x20] = b"\x04"
-            asyncio.create_task(external())
+            # Inject only after SET, at the relevant readback. A sleeping task
+            # can run during the fresh baseline on a busy CI host and then
+            # legitimately becomes part of the preserved baseline instead.
+            def external(room, command, objects, wrote):
+                if room == "room-1" and wrote:
+                    if fault == "inactive_changed" and command == CMD_GET_SETPOINT:
+                        objects[0x21] = temp_to_bytes(26)
+                    if fault == "mode_changed" and command == CMD_GET_MODE:
+                        objects[0x20] = b"\x04"
+                return objects
+            office.reply_hook = external
         with pytest.raises((BackendUnavailable, asyncio.CancelledError, TimeoutError, ConnectionError)):
             await change(backend)
         assert backend.stopped and office.budget.pending_operation("room-1")
