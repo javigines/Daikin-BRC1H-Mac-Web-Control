@@ -23,6 +23,31 @@ from .physical_sessions import PhysicalSessionBudget
 from .daikin import SessionState, WriteNotConfirmed
 
 
+def manual_fan_pair(objects):
+    """The pre-existing write gate; Auto/partial observations grant no SET."""
+    return all(k in objects and type(objects[k]) is bytes and len(objects[k]) == 1
+               and objects[k][0] in range(1, 6) for k in (0x20, 0x21))
+
+
+def local_fan_observation(objects, mode):
+    """Decode the two GET banks independently; never normalize raw objects.
+
+    Public sources recognize 0 as Auto and 1..5 as manual protocol codes.
+    Observation proves neither distinct physical speeds nor write capability.
+    Only Cool/Heat have an established active-bank mapping in this application.
+    """
+    values, statuses = {}, {}
+    for field, oid in (("cooling_fan_id", 0x20), ("heating_fan_id", 0x21)):
+        value = objects.get(oid)
+        valid = type(value) is bytes and len(value) == 1 and value[0] in range(6)
+        values[field] = value[0] if valid else None
+        statuses[field] = "available" if valid else "unknown" if oid in objects else "not_observed"
+    active = {3: "cooling_fan_id", 4: "heating_fan_id"}.get(mode)
+    values["fan_id"] = values[active] if active else None
+    statuses["fan_id"] = statuses[active] if active else "not_applicable"
+    return values, statuses
+
+
 SETPOINT_WIDTHS = {0x20: 2, 0x21: 2, **{oid: size for oid, size, _ in SETPOINT_EXTRA_FIELDS}}
 # ACK payloads are opaque: these are response profiles, not GET value schemas.
 # Public source rationale and the limits of this classification are in
@@ -201,15 +226,20 @@ class OfficeBackend(PreparedDaikinBackend):
         state["setpoint"] = state["heating_setpoint" if mode == 4 else "cooling_setpoint"]
         state["room_temp"] = state.pop("indoor_temperature")
         state["fan_id"] = None
-        if self.controls.fans:
+        fan_status = {}
+        local = getattr(self.port.radio.grant, "local", False)
+        if local or self.controls.fans:
             fans = raw[CMD_GET_FAN] = await self._request(CMD_GET_FAN)
-            valid = all(k in fans and type(fans[k]) is bytes and len(fans[k]) == 1 and fans[k][0] in range(1, 6) for k in (0x20, 0x21))
-            if not valid and not getattr(self.port.radio.grant, "local", False):
-                raise BackendUnavailable("Unsupported fan observations")
-            if valid:
+            if local:
+                observed, fan_status = local_fan_observation(fans, mode)
+                state.update(observed)
+            elif manual_fan_pair(fans):
                 state.update(cooling_fan_id=fans[0x20][0], heating_fan_id=fans[0x21][0])
                 state["fan_id"] = fans[0x21 if mode == 4 else 0x20][0]
+            else:
+                raise BackendUnavailable("Unsupported fan observations")
         state["field_status"] = {key: "available" if value is not None else "not_queried" for key, value in state.items()}
+        state["field_status"].update(fan_status)
         for key, oid in (("min_setpoint", 0xA3 if mode == 4 else 0xA2), ("max_setpoint", 0xB3 if mode == 4 else 0xB2)):
             value = raw[CMD_GET_SETPOINT].get(oid)
             if value and len(value) == 2 and 10 <= int.from_bytes(value, "big") / 128 <= 40:
@@ -229,6 +259,15 @@ class OfficeBackend(PreparedDaikinBackend):
             self.controls = controls
         return state
 
+    def _fan_write_ready(self):
+        if self.latest.get("mode_id") not in (3, 4):
+            return False
+        if not getattr(self.port.radio.grant, "local", False):
+            return True
+        # Keep the old two-manual-field permission independent of presentation.
+        # manual() checks this again against its fresh baseline before journaling.
+        return self.latest.get("fan_id") is not None and manual_fan_pair(self.raw.get(CMD_GET_FAN, {}))
+
     def control_view(self):
         stopped = self.stopped or self.closed or self.budget.pending_operation(self.room_id)
         limits = self.latest
@@ -241,8 +280,7 @@ class OfficeBackend(PreparedDaikinBackend):
                 setpoint = False
         return {"power": self.controls.power and not stopped, "setpoint": bool(setpoint and not stopped),
                 "modes": list(self.controls.modes) if not stopped else [],
-                "fans": list(self.controls.fans) if not stopped and limits.get("mode_id") in (3, 4)
-                    and (not getattr(self.port.radio.grant, "local", False) or limits.get("fan_id") is not None) else []}
+                "fans": list(self.controls.fans) if not stopped and self._fan_write_ready() else []}
 
     def validate_action(self, action, value):
         if action == "power" and self.controls.power and type(value) is bool:
@@ -250,8 +288,8 @@ class OfficeBackend(PreparedDaikinBackend):
         if action == "mode" and type(value) is int and value in self.controls.modes:
             return value
         if action == "fan" and type(value) is int and value in self.controls.fans:
-            if self.latest.get("mode_id") not in (3, 4) or (getattr(self.port.radio.grant, "local", False) and self.latest.get("fan_id") is None):
-                raise ValueError("Fan control requires cooling/heating mode")
+            if not self._fan_write_ready():
+                raise ValueError("Fan write requires cooling/heating and the existing manual-field profile")
             return value
         if action == "setpoint" and self.controls.setpoint:
             if type(value) not in (int, float) or not math.isfinite(value) or value != int(value):
