@@ -165,12 +165,11 @@ def test_unsupported_values_never_emit_set(office, action, value):
     asyncio.run(case())
 
 
-@pytest.mark.parametrize("schema", ["missing", "extra", "width", "flags", "zero_limits", "narrow_limits", "auto_mode"])
+@pytest.mark.parametrize("schema", ["missing", "width", "flags", "zero_limits", "narrow_limits", "auto_mode"])
 def test_setpoint_uses_reported_capabilities_and_preserves_full_block(office, schema):
     block = copy.deepcopy(office.states["room-1"][CMD_GET_SETPOINT])
     mode = 3
     if schema == "missing": block.pop(0x30)
-    if schema == "extra": block[0x99] = b"\x00"
     if schema == "width": block[0xA2] = b"\x10"
     if schema == "flags": block[0x31] = b"\xff"
     if schema == "zero_limits": block[0xA2] = b"\x00\x00"

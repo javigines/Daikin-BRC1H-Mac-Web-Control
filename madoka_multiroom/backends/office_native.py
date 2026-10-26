@@ -23,15 +23,46 @@ from .physical_sessions import PhysicalSessionBudget
 from .daikin import SessionState, WriteNotConfirmed
 
 
+SETPOINT_WIDTHS = {0x20: 2, 0x21: 2, **{oid: size for oid, size, _ in SETPOINT_EXTRA_FIELDS}}
+
+
+def setpoint_fields(objects, *, extensions=True):
+    """Validate the documented block; classify other GET TLVs as read-only.
+
+    Widths and SET argument membership come from pymadoka SetPointStatus.
+    Symbol bytes have no documented boolean domain. Keep them opaque, as with
+    the differential/configuration bytes; do not decode/re-encode or default.
+    """
+    if (not SETPOINT_WIDTHS.keys() <= objects.keys()
+            or any(type(objects[k]) is not bytes or len(objects[k]) != size
+                   for k, size in SETPOINT_WIDTHS.items())):
+        raise BackendUnavailable("Unrecognized setpoint schema; required fields missing or malformed")
+    extra = {k: v for k, v in objects.items() if k not in SETPOINT_WIDTHS}
+    if (extra and not extensions) or any(
+            type(k) is not int or not 0 <= k <= 255 or type(v) is not bytes or len(v) > 255
+            for k, v in extra.items()):
+        raise BackendUnavailable("Unrecognized setpoint extension schema")
+    if objects[0x30][0] not in (0, 1) or objects[0x31][0] not in (0, 1, 2):
+        raise BackendUnavailable("Unsupported setpoint flags")
+    return {k: objects[k] for k in SETPOINT_WIDTHS}, extra
+
+
 def validate_set_ack(command, objects):
     """A correlated SET response permits GET verification, never proves effect.
 
     pymadoka documents status-shaped SET replies whose value need not equal the
-    requested state. Accept only the known power/mode shapes, plus the legacy
-    empty response. Unknown schemas remain uncertain; never guess an error code.
+    requested state. SetPointStatus.parse in Feature.update supports the complete
+    setpoint status block, not a partial echo or a guessed status/error byte.
+    See docs/setpoint-compatibility.md for pinned schema evidence.
     """
     if objects in ({}, {0: b""}):
         return
+    if command == CMD_SET_SETPOINT:
+        try:
+            setpoint_fields(objects, extensions=False)
+        except BackendUnavailable as exc:
+            raise WriteNotConfirmed("Unrecognized SET_SETPOINT acknowledgement schema") from exc
+        return  # Status-shaped data is only permission to proceed to GET.
     values = range(2) if command == CMD_SET_POWER else range(6) if command == CMD_SET_MODE else ()
     if (set(objects) == {0x20} and type(objects[0x20]) is bytes
             and len(objects[0x20]) == 1 and objects[0x20][0] in values):
@@ -40,15 +71,8 @@ def validate_set_ack(command, objects):
 
 
 def setpoint_block(objects, mode, value, controls):
-    """Preserve every range/mode/limit byte; never use legacy zero defaults."""
-    widths = {0x20: 2, 0x21: 2, **{oid: size for oid, size, _ in SETPOINT_EXTRA_FIELDS}}
-    if (set(objects) != set(widths) or any(type(objects[k]) is not bytes or len(objects[k]) != size
-                                         for k, size in widths.items())):
-        raise BackendUnavailable("Unrecognized setpoint schema; commissioning evidence required")
-    # Unknown flags/symbols are rejected, not normalized into installer settings.
-    if (objects[0x30][0] not in (0, 1) or objects[0x31][0] not in (0, 1, 2)
-            or any(objects[k][0] not in (0, 1) for k in (0xA4, 0xA5, 0xB4, 0xB5))):
-        raise BackendUnavailable("Unsupported setpoint flags")
+    """Build only documented SET arguments, preserving every untouched byte."""
+    fields, _ = setpoint_fields(objects)
     if mode not in (3, 4) or type(value) not in (float, int) or not math.isfinite(value) or value != int(value):
         raise ValueError("Native setpoints require whole degrees and cooling/heating mode")
     target = 0x21 if mode == 4 else 0x20
@@ -59,7 +83,22 @@ def setpoint_block(objects, mode, value, controls):
         raise BackendUnavailable("Device setpoint limits unverified")
     if not max(lower, controls.minimum) <= value <= min(upper, controls.maximum):
         raise ValueError("Setpoint exceeds device/owner limits")
-    return [(k, temp_to_bytes(value) if k == target else objects[k]) for k in widths]
+    return [(k, temp_to_bytes(value) if k == target else v) for k, v in fields.items()]
+
+
+def validate_setpoint_readback(before, args, observed):
+    """Allow newly reported GET objects, but preserve the whole baseline.
+
+    Every known byte (including the modified target) and every pre-existing
+    read-only extension must match. Additional GET-only TLVs are never SET args.
+    """
+    try:
+        setpoint_fields(observed)
+    except BackendUnavailable as exc:
+        raise WriteNotConfirmed("Unrecognized setpoint readback schema") from exc
+    expected = {**before, **dict(args)}
+    if any(observed.get(k) != v for k, v in expected.items()):
+        raise WriteNotConfirmed("Setpoint block readback mismatch")
 
 
 class OfficeBackend(PreparedDaikinBackend):
@@ -263,10 +302,7 @@ class OfficeBackend(PreparedDaikinBackend):
                 expected[field] = value
                 if action == "setpoint":
                     expected["heating_setpoint" if before["mode_id"] == 4 else "cooling_setpoint"] = value
-                    # All accompanying flags and limits must be unchanged.
-                    expected_raw = dict(args)
-                    if self.raw[CMD_GET_SETPOINT] != expected_raw:
-                        raise WriteNotConfirmed("Setpoint block readback mismatch")
+                    validate_setpoint_readback(raw[CMD_GET_SETPOINT], args, self.raw[CMD_GET_SETPOINT])
                 if action == "fan":
                     expected["heating_fan_id" if before["mode_id"] == 4 else "cooling_fan_id"] = value
                 # Room temperature can move naturally. Mode/power and both

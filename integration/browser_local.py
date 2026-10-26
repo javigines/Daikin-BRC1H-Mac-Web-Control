@@ -29,13 +29,20 @@ sys.meta_path.insert(0, NoDriver())
 
 def serve(directory):
     import uvicorn
-    from integration.office_mock import closed_office
+    from integration.office_mock import closed_office, synthetic_setpoint_block
     from madoka_multiroom.api import build_local_app
     from madoka_multiroom.office_access import Controls
     with closed_office(directory, local=True) as local:
-        from madoka_protocol import CMD_SET_POWER, CMD_GET_POWER
+        from madoka_protocol import CMD_SET_POWER, CMD_GET_POWER, CMD_GET_SETPOINT, CMD_SET_SETPOINT
+        for state in local.states.values():
+            state[CMD_GET_SETPOINT] = synthetic_setpoint_block(extended=True)
         local.states['room-6'][CMD_GET_POWER][0x20] = b'\x00'
-        local.reply_hook = lambda room, command, objects, wrote: {0x20: b'\x00'} if command == CMD_SET_POWER else objects
+        def reply(room, command, objects, wrote):
+            if command == CMD_SET_POWER: return {0x20: b'\x00'}
+            if command == CMD_SET_SETPOINT: return synthetic_setpoint_block()
+            if command == CMD_GET_SETPOINT and wrote: objects[0x9B] = b'\x08'
+            return objects
+        local.reply_hook = reply
         if not local.fleet.settings_path.exists():
             for backend in local.fleet.backends.values(): backend.controls=Controls()
         local.failed_effect_rooms.add("room-3")
@@ -43,6 +50,11 @@ def serve(directory):
         app=build_local_app(local.config,str(Path(directory)/"history.db"),fleet=local.fleet)
         @app.get("/__closed")
         async def fixture_marker(): return {"fixture":Path(directory).name}
+        @app.get("/__closed/setpoint-evidence")
+        async def setpoint_evidence():
+            return {"sets": [c[0] for c in local.calls if len(c) == 3 and c[1] == CMD_SET_SETPOINT],
+                    "blocks": {r: {str(k): v.hex() for k, v in state[CMD_GET_SETPOINT].items()}
+                               for r, state in local.states.items()}}
         try:
             uvicorn.run(app,host="127.0.0.1",port=8090,workers=1,proxy_headers=False,
                 access_log=False,log_level="critical",loop="asyncio")
@@ -92,12 +104,19 @@ def main():
                     expect(card(i).locator(".connection")).to_have_text("Conectado")
                     expect(card(i).locator(".power")).to_be_enabled()
                     expect(card(i).locator(".increase")).to_be_enabled()
+                    expect(card(i).locator(".decrease")).to_be_enabled()
                     expect(card(i).locator(".mode")).to_be_disabled()
                     expect(card(i).locator(".fan")).to_be_disabled()
+                baseline=page.request.get(BASE+"/__closed/setpoint-evidence").json()
                 card(1).locator(".increase").click()
                 expect(page.locator("#confirm-dialog")).not_to_be_visible()
                 expect(card(1).locator(".setpoint")).to_have_text("23°")
                 expect(card(1).locator(".operation-status")).to_have_text("Cambio confirmado")
+                evidence=page.request.get(BASE+"/__closed/setpoint-evidence").json()
+                assert evidence['sets']==['room-1']
+                expected=json.loads(json.dumps(baseline['blocks']))
+                expected['room-1']['32']='0b80'  # synthetic 23 degrees * 128
+                assert evidence['blocks']==expected
                 card(1).locator(".decrease").click()
                 expect(card(1).locator(".setpoint")).to_have_text("22°")
                 card(2).locator(".local-configure").click()
@@ -166,7 +185,7 @@ def main():
                 assert errors==[],errors
                 browser.close()
         finally: stop()
-        print("PASS Chromium local HTTP: six closed native rooms, direct controls without credentials/reasons/dialogs, capability settings, uncertain SET without replay, room isolation, history/settings/restart, desktop/mobile; 0 JS errors; real drivers forbidden")
+        print("PASS Chromium local HTTP: six synthetic extended setpoint blocks, nonboolean symbols, status ACK plus GET, single SET and byte isolation, direct controls, capability settings, uncertain SET without replay, history/settings/restart, desktop/mobile; 0 JS errors; real drivers forbidden")
 
 
 if __name__=="__main__":
