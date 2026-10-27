@@ -461,15 +461,42 @@ class OfficeBackend(PreparedDaikinBackend):
         observed = await self._read((), initial=initial)
         self._trace('readback_validate')
         if action == "mode" and getattr(self.budget, "local", False):
+            # The immediate post-ACK mode GET can still describe the old
+            # value. Observe at most twice more (GET ONLY, never another SET),
+            # and accept only the original strict raw-preservation contract.
+            # No extra observations for a third mode or changed opaque TLVs.
             try:
                 validate_mode_effect(self.controls, value, raw, self.raw)
             except WriteNotConfirmed as exc:
+                pure_old_mode = (getattr(exc, "fields", None) == ["mode"]
+                    and getattr(exc, "mode_detail", None) == "mode_code_different"
+                    and getattr(exc, "mode_observed", None) == before["mode_id"]
+                    and getattr(exc, "mode_changed_ids", None) == [])
+                if pure_old_mode:
+                    for attempt, delay in enumerate((0.3, 0.6), 1):
+                        await asyncio.sleep(delay)
+                        self.manual_context["phase"] = "mode_settle_get"
+                        fresh_mode = await self._request(CMD_GET_MODE)
+                        observed = await self._read((), initial={CMD_GET_MODE: fresh_mode})
+                        try:
+                            validate_mode_effect(self.controls, value, raw, self.raw)
+                        except WriteNotConfirmed as next_error:
+                            exc = next_error
+                            if (next_error.fields != ["mode"] or
+                                    next_error.mode_detail != "mode_code_different" or
+                                    next_error.mode_observed != before["mode_id"] or
+                                    next_error.mode_changed_ids):
+                                break
+                        else:
+                            self._trace("mode_settled", attempt=attempt,
+                                        result="strict_GET_confirmed")
+                            return observed
                 diagnostic = {"fields": exc.fields, "reason": exc.reason}
                 if hasattr(exc, "mode_detail"):
                     diagnostic.update(mode_detail=exc.mode_detail, mode_observed=exc.mode_observed,
                                       mode_changed_ids=exc.mode_changed_ids)
-                self._trace('readback_validate', **diagnostic)
-                raise
+                self._trace("readback_validate", **diagnostic)
+                raise exc
             return observed
         field = {"power": "power_on", "mode": "mode_id", "fan": "fan_id", "setpoint": "setpoint"}[action]
         expected = dict(before)
