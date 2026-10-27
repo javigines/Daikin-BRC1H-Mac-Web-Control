@@ -147,7 +147,7 @@ function render(card, data) {
       }
       review.hidden = !["pending","uncertain"].includes(data.last_operation?.status) ||
         data.last_operation?.action !== "mode";
-      review.disabled = card.busy || stale || !data.connected;
+      review.disabled = card.busy || isStale(data) || !data.connected;
       let targets = detail.el.querySelector(".local-targets");
       if (!targets) { targets = document.createElement("p"); targets.className = "local-targets muted"; detail.el.querySelector(".updated").before(targets); }
       targets.textContent = `Objetivos guardados · frío: ${data.state.cooling_setpoint ?? "—"} °C · calor: ${data.state.heating_setpoint ?? "—"} °C. Activo: ${data.state.setpoint ?? "no aplicable"}`;
