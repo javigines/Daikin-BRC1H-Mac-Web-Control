@@ -149,3 +149,53 @@ def test_mode_reconciliation_endpoint_requires_local_csrf_and_unresolved_mode(tm
             response = client.post(url, json=body, headers={"X-Demo-Token": token})
             assert response.status_code == 503
             assert not set_calls(local)
+
+
+@pytest.mark.parametrize("behavior,expected_reads,confirmed", [
+    ("lag", 2, True),
+    ("never", 3, False),
+    ("changed_extension", 2, False),
+])
+def test_bounded_get_only_mode_settling_does_not_accept_unverified_effect(
+        tmp_path, behavior, expected_reads, confirmed):
+    with closed_office(tmp_path, local=True) as local:
+        async def case():
+            store = RoomStore(":memory:", mode="real")
+            manager = RoomManager(local.config.rooms, store, offline_fleet=local.fleet)
+            backend = await local.fleet.ensure_room("room-1")
+            manager.room("room-1").backend = backend
+            await manager.operate("room-1")
+            local.apply_writes = behavior != "never"
+            reads = 0
+            def controlled_get(room, cmd, objects, wrote):
+                nonlocal reads
+                if room == "room-1" and cmd == CMD_GET_MODE and wrote:
+                    reads += 1
+                    if behavior in ("lag", "changed_extension") and reads == 1:
+                        objects[0x20] = b"\\x03"
+                    if behavior == "changed_extension" and reads == 2:
+                        objects[0x99] = b"\\x01"
+                return objects
+            local.reply_hook = controlled_get
+            operation = str(uuid4())
+            try:
+                if confirmed:
+                    result = await manager.native_manual(
+                        "room-1", "mode", 4, operation, "Synthetic settling mode test",
+                        expected_mode=3)
+                    assert result["last_operation"]["status"] == "confirmed"
+                    assert result["state"]["mode_id"] == 4
+                else:
+                    with pytest.raises(RoomUnavailable):
+                        await manager.native_manual(
+                            "room-1", "mode", 4, operation, "Synthetic settling mode test",
+                            expected_mode=3)
+                    assert local.budget.operation(operation)["status"] == "uncertain"
+                assert reads == expected_reads
+                assert len(set_calls(local)) == 1
+                stages = [e["stage"] for e in local.budget.operation_events(operation)]
+                assert ("mode_settled" in stages) is confirmed
+            finally:
+                await manager.close()
+                store.close()
+        asyncio.run(case())
