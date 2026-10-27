@@ -400,6 +400,62 @@ class RoomManager:
                 self.operations.discard(task)
         return self.snapshot(room_id)
 
+    async def native_reconcile_local_mode(self, room_id, operation_id, *, wall_mode,
+                                          wall_target, wall_power, wall_checked, operator_note):
+        """Rearm only after an explicit wall observation and two stable GETs.
+
+        This is an audited review of the CURRENT state, not an assertion about
+        what the historical SET did. No SET is sent from this procedure.
+        """
+        if not self.local or self.closing:
+            raise RoomUnavailable("Solo se puede conciliar un modo en la aplicación local")
+        room = self.room(room_id)
+        if not room.config.enabled or room.lock.locked():
+            raise RoomBusy("La sala no está disponible para revisar")
+        budget = self.offline_fleet.budget
+        last = budget.last_operation(room_id)
+        if (not last or last["operation_id"] != operation_id or last["action"] != "mode"
+                or last["status"] not in ("pending", "uncertain")):
+            raise RoomUnavailable("No hay un único cambio de modo pendiente que corresponda a esta sala")
+        if not self.offline_fleet.admitted(room_id):
+            raise RoomUnavailable("Primero pulsa Consultar estado para reconectar esta sala sin escribir")
+        async with room.lock:
+            backend = self.offline_fleet.backends[room_id]
+            room.backend = backend
+            if backend.stopped or backend.closed or not backend.port.ready:
+                raise RoomUnavailable("La conexión Bluetooth no está lista; consulta el estado primero")
+            from madoka_protocol import CMD_GET_MODE, CMD_GET_POWER, CMD_GET_SETPOINT, CMD_GET_FAN
+            try:
+                async with self.capacity:
+                    first = await backend.snapshot(("power", "mode", "setpoint", "sensor", "fan"))
+                    first_raw = copy.deepcopy(backend.raw)
+                    await asyncio.sleep(0.35)
+                    second = await backend.snapshot(("power", "mode", "setpoint", "sensor", "fan"))
+                    second_raw = copy.deepcopy(backend.raw)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                raise RoomUnavailable("No se pudieron completar dos lecturas BLE; se mantiene el bloqueo") from None
+            if (not backend.port.ready or backend.stopped or backend.closed
+                    or any(first_raw.get(cmd) != second_raw.get(cmd) for cmd in
+                           (CMD_GET_MODE, CMD_GET_POWER, CMD_GET_SETPOINT, CMD_GET_FAN))
+                    or any(first.get(key) != second.get(key) for key in
+                           ("mode_id", "power_on", "cooling_setpoint", "heating_setpoint"))):
+                raise RoomUnavailable("Las lecturas no son estables; el cambio sigue bloqueado")
+            try:
+                budget.reconcile_local_mode(room_id, operation_id,
+                    wall_mode=wall_mode, wall_target=wall_target, wall_power=wall_power,
+                    observed=second, attested=wall_checked, operator_note=operator_note)
+            except (ValueError, Exception) as exc:
+                # Return no protocol bytes or private identity to the browser.
+                raise RoomUnavailable("La revisión del mando no coincide con las lecturas o el historial; sigue bloqueado") from None
+            room.latest = copy.deepcopy(second)
+            room.updated_at, room.updated_monotonic = time.time(), time.monotonic()
+            room.failure = room.manual_error = None
+            self.store.append(room_id, int(room.updated_at * 1000), second)
+            room.policy.observe(second, time.monotonic(), allow_correction=False)
+        return self.snapshot(room_id)
+
     @asynccontextmanager
     async def preparation_window(self):
         if self.local:
