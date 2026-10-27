@@ -139,7 +139,7 @@ def test_wrong_operation_identity_cannot_reconcile(tmp_path):
 def test_mode_reconciliation_endpoint_requires_local_csrf_and_unresolved_mode(tmp_path):
     with closed_office(tmp_path, local=True) as local:
         app = build_local_app(local.config, str(tmp_path / "observations.db"), fleet=local.fleet)
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://127.0.0.1:8090", client=("127.0.0.1", 1234)) as client:
             body = dict(operation_id=str(uuid4()), wall_mode=4, wall_target=21,
                         wall_power=True, wall_checked=True,
                         operator_note="Physical wall observed in the office")
