@@ -172,9 +172,9 @@ def test_bounded_get_only_mode_settling_does_not_accept_unverified_effect(
                 if room == "room-1" and cmd == CMD_GET_MODE and wrote:
                     reads += 1
                     if behavior in ("lag", "changed_extension") and reads == 1:
-                        objects[0x20] = b"\\x03"
+                        objects[0x20] = bytes([3])
                     if behavior == "changed_extension" and reads == 2:
-                        objects[0x99] = b"\\x01"
+                        objects[0x99] = bytes([1])
                 return objects
             local.reply_hook = controlled_get
             operation = str(uuid4())
