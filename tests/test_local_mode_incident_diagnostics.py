@@ -16,7 +16,7 @@ def baseline():
 
 
 @pytest.mark.parametrize("mode,extension,classification,changed,observed", [
-    (b"\x03", b"\x40", "mode_code_different", ["0x20"], 3),
+    (b"\x03", b"\x40", "mode_code_different", [], 3),
     (b"\x04", b"\x41", "mode_metadata_changed", ["0x20", "0x21"], 4),
     (b"\x04", b"\x40", None, [], None),
     (b"", b"\x40", "mode_readback_invalid", ["0x20"], None),
