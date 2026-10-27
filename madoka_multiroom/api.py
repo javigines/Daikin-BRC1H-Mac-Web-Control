@@ -57,6 +57,15 @@ class ReviewBody(StrictModel):
     reason: str = Field(min_length=3, max_length=160)
 
 
+class LocalModeReconcileBody(StrictModel):
+    operation_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    wall_mode: int = Field(strict=True, ge=0, le=5)
+    wall_target: float | None = Field(default=None, ge=16, le=32, allow_inf_nan=False)
+    wall_power: bool = Field(strict=True)
+    wall_checked: Literal[True]
+    operator_note: str = Field(min_length=5, max_length=160)
+
+
 class SimulationBody(StrictModel):
     status: Literal["online", "disconnected", "error"]
     delay_ms: int = Field(default=0, ge=0, le=2000)
@@ -174,7 +183,7 @@ class LocalOnlyBoundary:
             if (headers.get(b"origin", b"http://127.0.0.1:8090") != b"http://127.0.0.1:8090"
                     or headers.get(b"sec-fetch-site") == b"cross-site"):
                 return await JSONResponse({"detail": "Acceso de otro origen bloqueado"}, 403)(scope, receive, send)
-            approved = bool(re.fullmatch(r"/api/controllers/[a-z][a-z0-9-]{0,31}/(manual|review-outcome|local-controls)", scope["path"]))
+            approved = bool(re.fullmatch(r"/api/controllers/[a-z][a-z0-9-]{0,31}/(manual|review-outcome|reconcile-mode|local-controls)", scope["path"]))
             if scope["method"] not in {"GET", "HEAD"} and not (scope["method"] == "POST" and approved):
                 return await JSONResponse({"detail": "Operación no disponible en el modo local"}, 403)(scope, receive, send)
         return await self.app(scope, receive, send)
@@ -368,6 +377,13 @@ def _build_app(config, db_path, *, offline_fleet=None, native_password=None, off
         @app.post("/api/controllers/{controller_id}/review-outcome")
         async def local_observe(request: Request, controller_id: str, body: StrictModel):
             return await lookup(request, controller_id).native_recover(controller_id, "User requested current observations")
+
+        @app.post("/api/controllers/{controller_id}/reconcile-mode")
+        async def local_reconcile_mode(request: Request, controller_id: str, body: LocalModeReconcileBody):
+            manager = lookup(request, controller_id)
+            return await manager.native_reconcile_local_mode(controller_id, body.operation_id,
+                wall_mode=body.wall_mode, wall_target=body.wall_target, wall_power=body.wall_power,
+                wall_checked=body.wall_checked, operator_note=body.operator_note)
 
         @app.post("/api/controllers/{controller_id}/local-controls")
         async def local_controls(request: Request, controller_id: str, body: LocalControls):
