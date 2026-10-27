@@ -124,6 +124,28 @@ def validate_mode_effect(controls, target, before_raw, after_raw):
     if mismatches:
         error = WriteNotConfirmed("Mode effect or preserved raw fields diverged; STOP")
         error.reason, error.fields = "mode_state_mismatch", mismatches
+        if "mode" in mismatches:
+            # Distinguish a missing/old primary mode from changed opaque TLVs.
+            # Never log raw values, UUIDs or controller extensions. This is
+            # diagnostic classification, NOT permission to accept an effect.
+            observed_mode = after_raw.get(CMD_GET_MODE)
+            primary = observed_mode.get(0x20) if isinstance(observed_mode, dict) else None
+            if type(primary) is not bytes or len(primary) != 1 or primary[0] not in range(6):
+                error.mode_detail = "mode_readback_invalid"
+                error.mode_observed = None
+            elif primary[0] != target:
+                error.mode_detail = "mode_code_different"
+                error.mode_observed = primary[0]
+            else:
+                error.mode_detail = "mode_metadata_changed"
+                error.mode_observed = primary[0]
+            if isinstance(observed_mode, dict):
+                before_mode = before_raw[CMD_GET_MODE]
+                error.mode_changed_ids = [f"0x{k:02x}" for k in
+                    sorted(set(before_mode) | set(observed_mode))
+                    if type(k) is int and before_mode.get(k) != observed_mode.get(k)]
+            else:
+                error.mode_changed_ids = []
         raise error
 
 
