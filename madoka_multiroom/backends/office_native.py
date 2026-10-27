@@ -464,7 +464,11 @@ class OfficeBackend(PreparedDaikinBackend):
             try:
                 validate_mode_effect(self.controls, value, raw, self.raw)
             except WriteNotConfirmed as exc:
-                self._trace('readback_validate', fields=exc.fields, reason=exc.reason)
+                diagnostic = {"fields": exc.fields, "reason": exc.reason}
+                if hasattr(exc, "mode_detail"):
+                    diagnostic.update(mode_detail=exc.mode_detail, mode_observed=exc.mode_observed,
+                                      mode_changed_ids=exc.mode_changed_ids)
+                self._trace('readback_validate', **diagnostic)
                 raise
             return observed
         field = {"power": "power_on", "mode": "mode_id", "fan": "fan_id", "setpoint": "setpoint"}[action]
