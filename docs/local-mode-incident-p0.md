@@ -6,7 +6,7 @@ Tracking: [#25](https://github.com/javigines/Daikin-BRC1H-Mac-Web-Control/issues
 
 A Cool (3) to Heat (4) command got a recognized `mode_status_v1` ACK. A single immediate GET_MODE and subsequent full readback triggered `mode_state_mismatch` for the entire raw mode block; the historical operation is uncertain and the web disables this room's controls. The diagnostic did not retain the exact post-SET raw mode block, therefore it cannot retrospectively discriminate a still-old mode code from an opaque TLV change.
 
-**Later Owner UI evidence, 27 Oct 2026 01:29:28:** this room is connected; software reports **Heat (4), ON, ambient 21°C, stored Cool 23°C, Heat 21°C, active target 21°C**. This demonstrates only a later application observation. It does **not** establish that the original SET had completed at the immediate GET, that the physical wall shows Heat, or that firmware metadata was unchanged. The real wall observation is still missing.
+**Later Owner UI evidence, 27 Oct 2026 01:29:28:** this room is connected; software reports **Heat (4), ON, stored Cool 23°C, Heat 21°C, active target 21°C**. This demonstrates only a later application observation. It does **not** establish that the original SET had completed at the immediate GET, that the physical wall shows Heat, or that firmware metadata was unchanged. The real wall observation is still missing.
 
 ## Existing production version (not recovered)
 

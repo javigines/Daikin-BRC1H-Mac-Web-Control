@@ -420,6 +420,15 @@ class RoomManager:
         if not self.offline_fleet.admitted(room_id):
             raise RoomUnavailable("Primero pulsa Consultar estado para reconectar esta sala sin escribir")
         async with room.lock:
+            # Re-check the durable operation after waiting for the room lock.
+            # Another reconciliation or a recovery request may have completed
+            # while this request was queued; do not spend another full pair of
+            # GETs on an operation that is no longer unresolved.
+            current = budget.last_operation(room_id)
+            if (not current or current["operation_id"] != operation_id
+                    or current["action"] != "mode"
+                    or current["status"] not in ("pending", "uncertain")):
+                raise RoomUnavailable("No hay un único cambio de modo pendiente que corresponda a esta sala")
             backend = self.offline_fleet.backends[room_id]
             room.backend = backend
             if backend.stopped or backend.closed or not backend.port.ready:
@@ -446,7 +455,7 @@ class RoomManager:
                 budget.reconcile_local_mode(room_id, operation_id,
                     wall_mode=wall_mode, wall_target=wall_target, wall_power=wall_power,
                     observed=second, attested=wall_checked, operator_note=operator_note)
-            except (ValueError, Exception) as exc:
+            except Exception:
                 # Return no protocol bytes or private identity to the browser.
                 raise RoomUnavailable("La revisión del mando no coincide con las lecturas o el historial; sigue bloqueado") from None
             room.latest = copy.deepcopy(second)
