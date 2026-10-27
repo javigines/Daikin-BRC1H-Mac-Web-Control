@@ -578,6 +578,33 @@ def main():
                         assert view['last_operation']['before_state']['mode_contract']['to_mode'] == mode
                         assert view['state']['heating_setpoint'] == 24
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                # An uncertain mode remains blocked after GET-only review.
+                # A separate explicit wall + two stable GET reconciliation can
+                # restore only that room without changing historical outcome.
+                page.set_viewport_size({'width':1440,'height':1100})
+                page.reload()
+                card(1).locator('.native-recover').click()
+                expect(card(1).locator('.local-reconcile')).to_be_enabled(timeout=12000)
+                expect(card(1).locator('.mode')).to_be_disabled()
+                original = page.request.get(BASE+'/api/controllers/room-1').json()['last_operation']
+                assert original['status'] == 'uncertain' and original['action'] == 'mode'
+                expected_sets = page.request.get(BASE+'/__closed/fan-evidence').json()['sets']
+                card(1).locator('.local-reconcile').click()
+                review = page.locator('#mode-reconcile-dialog')
+                expect(review).to_be_visible()
+                review.locator('#wall-mode').select_option('1')  # mock wall: Dry
+                review.locator('#wall-power').select_option('true')
+                review.locator('#wall-note').fill('Operator saw Dry and ON on this synthetic wall')
+                review.locator('#wall-checked').check()
+                review.get_by_role('button',name='Verificar y recuperar sin enviar órdenes').click()
+                expect(card(1).locator('.operation-status')).to_contain_text('cambio anterior no se confirmó',timeout=12000)
+                outcome = page.request.get(BASE+'/api/controllers/room-1').json()
+                assert outcome['last_operation']['status'] == 'reviewed_uncertain'
+                assert outcome['last_operation']['operation_id'] == original['operation_id']
+                assert any(e['stage'] == 'operator_mode_reconciled'
+                           for e in outcome['last_operation']['diagnostics'])
+                assert page.request.get(BASE+'/__closed/fan-evidence').json()['sets'] == expected_sets
+                expect(card(1).locator('.mode')).to_be_enabled()
                 assert errors==[],errors
                 browser.close()
         finally: stop()

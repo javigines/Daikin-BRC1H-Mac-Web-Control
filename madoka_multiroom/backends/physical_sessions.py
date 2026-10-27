@@ -285,6 +285,62 @@ class PhysicalSessionBudget:
                             (json.dumps({"state": observed, "reason": reason}), room,
                              bool(getattr(self, 'local', False)), bool(getattr(self, 'local', False))))
 
+    def reconcile_local_mode(self, room, operation_id, *, wall_mode, wall_target,
+                             wall_power, observed, attested, operator_note):
+        """Explicit wall + stable-GET review; historical effect stays UNCONFIRMED.
+
+        Only the Local, already-owned room is eligible. Neither polling nor
+        acknowledge_operations invokes this. A review never sends a SET.
+        """
+        if not self.local:
+            raise PhysicalBackendDisabled("Only Local may reconcile an uncertain mode")
+        if (attested is not True or not isinstance(operator_note, str)
+                or not 5 <= len(operator_note.strip()) <= 160):
+            raise ValueError("Explicit physical wall inspection and note required")
+        if type(wall_mode) is not int or wall_mode not in range(6) or type(wall_power) is not bool:
+            raise ValueError("Invalid wall observation")
+        if type(observed) is not dict or type(observed.get("mode_id")) is not int:
+            raise ValueError("Fresh full native observation required")
+        if (wall_mode != observed["mode_id"] or wall_power != observed.get("power_on")
+                or (wall_mode in (3, 4)
+                    and (type(wall_target) not in (int, float)
+                         or wall_target != observed.get("setpoint")))
+                or (wall_mode not in (3, 4) and wall_target is not None)):
+            raise ValueError("Wall and Bluetooth observations disagree")
+        if room not in self.native_grants:
+            raise CleanupUncertain("Unknown room")
+        digest = hashlib.sha256(self.native_grants[room].identity.encode()).hexdigest()
+        binding = self.db.execute("SELECT digest FROM bindings WHERE room=?", (room,)).fetchone()
+        if not binding or binding["digest"] != digest:
+            raise CleanupUncertain("Room identity differs from durable binding")
+        # Do not permit reconciliation when several unresolved operations exist.
+        unresolved = self.db.execute(
+            "SELECT operation_id,action,status FROM native_operations WHERE room=? AND status IN ('pending','uncertain')",
+            (room,)).fetchall()
+        if (len(unresolved) != 1 or unresolved[0]["operation_id"] != operation_id
+                or unresolved[0]["action"] != "mode"):
+            raise CleanupUncertain("Exactly one matching unresolved mode operation required")
+        record = {"decision": "reviewed_uncertain_not_confirmed",
+                  "attestation": "operator_observed_wall",
+                  "wall_mode": wall_mode, "wall_target": wall_target,
+                  "wall_power": wall_power, "observed_mode": observed["mode_id"],
+                  "observed_setpoint": observed.get("setpoint"),
+                  "observed_cooling": observed.get("cooling_setpoint"),
+                  "observed_heating": observed.get("heating_setpoint"),
+                  "observed_power": observed.get("power_on"),
+                  "identity_digest": digest, "operator_note": operator_note.strip()}
+        with self.db:
+            updated = self.db.execute(
+                "UPDATE native_operations SET status='reviewed_uncertain' "
+                "WHERE operation_id=? AND room=? AND action='mode' AND status IN ('pending','uncertain')",
+                (operation_id, room))
+            if updated.rowcount != 1:
+                raise CleanupUncertain("Concurrent operation state changed")
+            self.db.execute(
+                "INSERT INTO native_operation_events(operation_id,at,stage,details) VALUES (?,?,?,?)",
+                (operation_id, time.time(), "operator_mode_reconciled", json.dumps(record)))
+        return record
+
     def resolve_offline(self, evidence):
         if self.native:
             raise PhysicalBackendDisabled("Offline evidence cannot release native ownership")

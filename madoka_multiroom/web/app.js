@@ -102,6 +102,12 @@ function updateControls(root, card) {
   if (lastRead) lastRead.textContent = `Última lectura: ${stamp(data.updated_at)}`;
   const recover = root.querySelector(".native-recover");
   if (recover) { recover.hidden = !data.error && !["pending","uncertain"].includes(outcome); recover.disabled = card.busy || failed; }
+  const modeReview = root.querySelector(".local-reconcile");
+  if (modeReview) {
+    modeReview.hidden = !localMode || !["pending","uncertain"].includes(outcome) ||
+      data.last_operation?.action !== "mode";
+    modeReview.disabled = card.busy || stale || !data.connected;
+  }
   status.dataset.error = String(Boolean(card.error || data.error));
   root.setAttribute("aria-busy", String(card.busy));
 }
@@ -132,6 +138,16 @@ function render(card, data) {
         const title = document.createElement("summary"); title.textContent = "Diagnóstico del último cambio";
         diagnostics.append(title, document.createElement("pre")); detail.el.append(diagnostics); }
       diagnostics.querySelector("pre").textContent = JSON.stringify(data.last_operation?.diagnostics || data.diagnostic || [], null, 2);
+      let review = detail.el.querySelector(".local-reconcile");
+      if (!review) {
+        review = document.createElement("button"); review.type = "button";
+        review.className = "local-reconcile"; review.textContent = "Revisar bloqueo y recuperar controles";
+        review.addEventListener("click", () => openModeReconciliation(card));
+        diagnostics.after(review);
+      }
+      review.hidden = !["pending","uncertain"].includes(data.last_operation?.status) ||
+        data.last_operation?.action !== "mode";
+      review.disabled = card.busy || isStale(data) || !data.connected;
       let targets = detail.el.querySelector(".local-targets");
       if (!targets) { targets = document.createElement("p"); targets.className = "local-targets muted"; detail.el.querySelector(".updated").before(targets); }
       targets.textContent = `Objetivos guardados · frío: ${data.state.cooling_setpoint ?? "—"} °C · calor: ${data.state.heating_setpoint ?? "—"} °C. Activo: ${data.state.setpoint ?? "no aplicable"}`;
@@ -226,6 +242,11 @@ function createCard(data) {
       configure.addEventListener("click", () => localSettings(card)); el.append(configure);
       const hint = document.createElement("p"); hint.className = "small muted";
       hint.textContent = "Los controles no disponibles se muestran deshabilitados."; el.append(hint);
+      const reviewMode = document.createElement("button"); reviewMode.type = "button";
+      reviewMode.className = "local-reconcile"; reviewMode.textContent = "Revisar bloqueo y recuperar controles";
+      reviewMode.hidden = true;
+      reviewMode.addEventListener("click", () => openModeReconciliation(card));
+      el.append(reviewMode);
     }
   }
   bindControls(el,card);
@@ -478,6 +499,46 @@ setInterval(() => {
   for (const card of cards.values()) if (card.data.updated_at && Date.now()/1000-card.data.updated_at > card.data.stale_after_seconds) render(card,{...card.data,stale:true});
   updateOverview();
 },1000);
+let modeReconcileCard = null;
+function openModeReconciliation(card) {
+  const op = card.data.last_operation;
+  if (!localMode || !["pending","uncertain"].includes(op?.status) || op.action !== "mode" ||
+      !card.data.connected || isStale(card.data) || card.busy) return;
+  modeReconcileCard = card;
+  const dialog = document.querySelector("#mode-reconcile-dialog");
+  dialog.querySelector("form").reset();
+  dialog.querySelector("#mode-reconcile-room").textContent =
+    card.data.name + " · cambio anterior pendiente de revisión; no se volverá a enviar.";
+  dialog.querySelector("#wall-target").required = false;
+  dialog.showModal();
+}
+document.querySelector("#wall-mode").addEventListener("change", event => {
+  const isTempMode = ["3","4"].includes(event.target.value);
+  const input = document.querySelector("#wall-target");
+  input.required = isTempMode;
+  if (!isTempMode) input.value = "";
+});
+document.querySelector("#cancel-mode-reconcile").addEventListener("click", () => {
+  document.querySelector("#mode-reconcile-dialog").close(); modeReconcileCard = null;
+});
+document.querySelector("#mode-reconcile-form").addEventListener("submit", event => {
+  event.preventDefault();
+  const card = modeReconcileCard;
+  if (!card || !["pending","uncertain"].includes(card.data.last_operation?.status)) return;
+  const mode = Number(document.querySelector("#wall-mode").value);
+  const target = document.querySelector("#wall-target").value;
+  const power = document.querySelector("#wall-power").value;
+  const note = document.querySelector("#wall-note").value.trim();
+  const confirmed = document.querySelector("#wall-checked").checked;
+  if (!confirmed || !note || !power || (mode === 3 || mode === 4) && !target) return;
+  const body = {operation_id:card.data.last_operation.operation_id,
+    wall_mode:mode,wall_target:mode === 3 || mode === 4 ? Number(target) : null,
+    wall_power:power === "true",wall_checked:true,operator_note:note};
+  document.querySelector("#mode-reconcile-dialog").close();
+  modeReconcileCard = null;
+  mutate(card,"reconcile-mode",body);
+});
+
 document.querySelector("#native-connect").addEventListener("click", async () => {
   if (!nativeReadonly || !nativeRoomName || nativeAttempted || !window.confirm(`${nativeRoomName}: ¿confirmas la autorización vigente para una conexión de solo lectura? No se podrá repetir.`)) return;
   nativeAttempted = true;
